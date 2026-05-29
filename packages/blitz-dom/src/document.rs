@@ -1112,11 +1112,6 @@ impl BaseDocument {
             }
             Resource::Font(bytes, overrides) => {
                 let font = Blob::new(Arc::new(bytes));
-                let info_override = FontInfoOverride {
-                    family_name: metadata.family_name.as_deref(),
-                    ..Default::default()
-                };
-
                 // Build a `FontInfoOverride` from the `@font-face` descriptors
                 // captured during stylesheet parsing. Without this, parley
                 // reads the family name from the TTF's own metadata, which
