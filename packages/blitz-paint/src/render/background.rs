@@ -25,9 +25,6 @@ use tracing::warn;
 
 impl ElementCx<'_, '_> {
     pub(super) fn draw_background(&self, scene: &mut impl PaintScene) {
-        use GenericImage::*;
-        use StyloBackgroundClip::*;
-
         let bg_styles = &self.style.get_background();
 
         let background_clip = get_cyclic(
@@ -35,9 +32,9 @@ impl ElementCx<'_, '_> {
             bg_styles.background_image.0.len() - 1,
         );
         let background_clip_path = match background_clip {
-            BorderBox => self.frame.border_box_path(),
-            PaddingBox => self.frame.padding_box_path(),
-            ContentBox => self.frame.content_box_path(),
+            StyloBackgroundClip::BorderBox => self.frame.border_box_path(),
+            StyloBackgroundClip::PaddingBox => self.frame.padding_box_path(),
+            StyloBackgroundClip::ContentBox => self.frame.content_box_path(),
         };
 
         // Draw background color (if any)
@@ -46,9 +43,9 @@ impl ElementCx<'_, '_> {
         for (idx, segment) in bg_styles.background_image.0.iter().enumerate().rev() {
             let background_clip = get_cyclic(&bg_styles.background_clip.0, idx);
             let background_clip_path = match background_clip {
-                BorderBox => self.frame.border_box_path(),
-                PaddingBox => self.frame.padding_box_path(),
-                ContentBox => self.frame.content_box_path(),
+                StyloBackgroundClip::BorderBox => self.frame.border_box_path(),
+                StyloBackgroundClip::PaddingBox => self.frame.padding_box_path(),
+                StyloBackgroundClip::ContentBox => self.frame.content_box_path(),
             };
 
             self.context.layer_manager.maybe_with_layer(
@@ -57,32 +54,34 @@ impl ElementCx<'_, '_> {
                 1.0,
                 self.transform,
                 &background_clip_path,
+                None,
+                None,
                 |scene| {
                     match segment {
-                        None => {
+                        GenericImage::None => {
                             // Do nothing
                         }
-                        Gradient(gradient) => {
+                        GenericImage::Gradient(gradient) => {
                             self.draw_gradient_bg(scene, gradient, idx, *background_clip)
                         }
-                        Url(_) => {
+                        GenericImage::Url(_) => {
                             self.draw_raster_bg_image(scene, idx);
                             #[cfg(feature = "svg")]
                             self.draw_svg_bg_image(scene, idx);
                         }
-                        LightDark(_) => {
+                        GenericImage::LightDark(_) => {
                             #[cfg(feature = "tracing")]
                             warn!("Implement background drawing for ImageLightDark")
                         }
-                        PaintWorklet(_) => {
+                        GenericImage::PaintWorklet(_) => {
                             #[cfg(feature = "tracing")]
                             warn!("Implement background drawing for Image::PaintWorklet")
                         }
-                        CrossFade(_) => {
+                        GenericImage::CrossFade(_) => {
                             #[cfg(feature = "tracing")]
                             warn!("Implement background drawing for Image::CrossFade")
                         }
-                        ImageSet(_) => {
+                        GenericImage::ImageSet(_) => {
                             #[cfg(feature = "tracing")]
                             warn!("Implement background drawing for Image::ImageSet")
                         }
@@ -150,6 +149,8 @@ impl ElementCx<'_, '_> {
 
     #[cfg(feature = "svg")]
     fn draw_svg_bg_image(&self, scene: &mut impl PaintScene, idx: usize) {
+        use kurbo::Affine;
+
         let bg_image = self.element.background_images.get(idx);
 
         let Some(Some(bg_image)) = bg_image.as_ref() else {
@@ -183,11 +184,9 @@ impl ElementCx<'_, '_> {
             frame_h - bg_size.height as f32,
         );
 
-        let transform = kurbo::Affine::translate((
-            (self.pos.x + bg_pos.x) * self.scale,
-            (self.pos.y + bg_pos.y) * self.scale,
-        ))
-        .pre_scale_non_uniform(x_ratio, y_ratio);
+        let transform = self.transform
+            * kurbo::Affine::translate((bg_pos.x * self.scale, bg_pos.y * self.scale))
+            * Affine::scale_non_uniform(x_ratio, y_ratio);
 
         anyrender_svg::render_svg_tree(scene, svg, transform);
     }

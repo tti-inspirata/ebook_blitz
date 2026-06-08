@@ -368,6 +368,7 @@ impl BaseDocument {
         style_config::set_pref!("layout.grid.enabled", true);
         style_config::set_pref!("layout.unimplemented", true);
         style_config::set_pref!("layout.columns.enabled", true);
+        style_config::set_pref!("layout.css.basic-shape-shape.enabled", true);
         style_config::set_pref!("layout.threads", -1);
 
         let viewport = config.viewport.unwrap_or_default();
@@ -1230,7 +1231,7 @@ impl BaseDocument {
             return None;
         }
 
-        self.root_element().hit(x, y)
+        self.root_element().hit(x, y, self.viewport().scale_f64())
     }
 
     pub fn focus_next_node(&mut self) -> Option<usize> {
