@@ -1,9 +1,5 @@
 name: Publish Browser
 on:
-  push:
-    branches:
-      - main
-      - ci-test/*
   workflow_dispatch:
     # inputs:
     #   post:
