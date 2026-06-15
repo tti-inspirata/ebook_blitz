@@ -314,8 +314,13 @@ impl BaseDocument {
             .length
             .resolve(CSSPixelLength::new(known_dimensions.width.unwrap_or(0.0)))
             .px();
+        // Parley lays out in device pixels (font sizes are pre-scaled by the
+        // builder's `scale`), and every other length fed into this inline layout
+        // is multiplied by `scale` (padding/border `pbw`, slot widths, etc.).
+        // `resolved_text_indent` is in CSS px, so it must be scaled too; otherwise
+        // on HiDPI (scale > 1) `text-indent: 2em` renders as only 2em/scale.
         inline_layout.layout.set_text_indent(
-            resolved_text_indent,
+            resolved_text_indent * scale,
             // NOTE: hanging and each_line don't current work because parsing them is cfg'd out in Stylo
             // due to Servo not yet supporting those features. They should start to "just work" in Blitz
             // once support is enabled in Stylo.
