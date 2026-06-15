@@ -25,7 +25,12 @@ pub(crate) fn stroke_text<'a>(
                 let synthesis = run.synthesis();
                 let glyph_xform = synthesis
                     .skew()
-                    .map(|angle| Affine::skew(angle.to_radians().tan() as f64, 0.0));
+                    // `fontique` reports faux-oblique skew in CSS-positive degrees,
+                    // while `kurbo::Affine::skew` documents positive X skew in a
+                    // Y-up coordinate system. Our screen-space text rendering is
+                    // visually Y-down, so invert the sign to preserve CSS italic
+                    // direction for synthetic skew.
+                    .map(|angle| Affine::skew(-(angle.to_radians().tan() as f64), 0.0));
 
                 // Styles
                 let styles = doc
