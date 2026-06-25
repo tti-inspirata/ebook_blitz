@@ -3,7 +3,8 @@ use blitz_dom::{BaseDocument, node::TextBrush, util::ToColorColor};
 use kurbo::{Affine, Stroke};
 use parley::{Affinity, Cursor, Layout, Line, PositionedLayoutItem, Selection};
 use peniko::Fill;
-use style::values::computed::TextDecorationLine;
+use style::values::computed::{Length, TextDecorationLine};
+use style::values::generics::box_::{BaselineShift, BaselineShiftKeyword};
 
 use crate::{FONT_EMBOLDEN_ENABLED, SELECTION_COLOR};
 
@@ -33,11 +34,40 @@ pub(crate) fn stroke_text<'a>(
                     .map(|angle| Affine::skew(-(angle.to_radians().tan() as f64), 0.0));
 
                 // Styles
-                let styles = doc
-                    .get_node(style.brush.id)
-                    .unwrap()
-                    .primary_styles()
-                    .unwrap();
+                let span_node = doc.get_node(style.brush.id).unwrap();
+                let styles = span_node.primary_styles().unwrap();
+
+                // `vertical-align: super/sub` is parsed by Stylo into `baseline-shift`
+                // (css-inline-3). Parley 0.10 has no baseline-shift support and the
+                // layout never moves the glyphs, so superscript/subscript text would
+                // otherwise sit on the baseline. Apply the shift here at paint time.
+                // Sign is screen-space (Y-down): raising is negative.
+                let baseline_shift_dy: f32 = {
+                    // Per spec the offset is relative to the *parent's* used font-size.
+                    let parent_font_size = span_node
+                        .parent
+                        .and_then(|pid| doc.get_node(pid))
+                        .and_then(|p| p.primary_styles())
+                        .map(|ps| ps.clone_font_size().used_size().px())
+                        .unwrap_or(font_size);
+                    match styles.get_box().baseline_shift.clone() {
+                        // UA default offsets when font metrics are unavailable:
+                        // super raises by 1/3, sub lowers by 1/5 of the font-size.
+                        BaselineShift::Keyword(BaselineShiftKeyword::Super) => {
+                            -parent_font_size / 3.0
+                        }
+                        BaselineShift::Keyword(BaselineShiftKeyword::Sub) => {
+                            parent_font_size / 5.0
+                        }
+                        // A positive baseline-shift length raises the box.
+                        BaselineShift::Length(lp) => {
+                            -lp.resolve(Length::new(parent_font_size)).px()
+                        }
+                        // top/center/bottom keywords are line-box relative; unsupported.
+                        BaselineShift::Keyword(_) => 0.0,
+                    }
+                };
+
                 let itext_styles = styles.get_inherited_text();
                 let text_styles = styles.get_text();
                 let text_color = itext_styles.color.as_color_color();
@@ -73,7 +103,7 @@ pub(crate) fn stroke_text<'a>(
                     glyph_run.positioned_glyphs().map(|glyph| anyrender::Glyph {
                         id: glyph.id as _,
                         x: glyph.x,
-                        y: glyph.y,
+                        y: glyph.y + baseline_shift_dy,
                     }),
                 );
 
@@ -81,7 +111,8 @@ pub(crate) fn stroke_text<'a>(
                     |offset: f32, size: f32, brush: &anyrender::Paint| {
                         let x = glyph_run.offset() as f64;
                         let w = glyph_run.advance() as f64;
-                        let y = (glyph_run.baseline() - offset + size / 2.0) as f64;
+                        let y =
+                            (glyph_run.baseline() - offset + size / 2.0 + baseline_shift_dy) as f64;
                         let line = kurbo::Line::new((x, y), (x + w, y));
                         scene.stroke(&Stroke::new(size as f64), transform, brush, None, &line)
                     };
