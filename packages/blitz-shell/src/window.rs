@@ -157,7 +157,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         let viewport = Viewport::new(size.width, size.height, scale, color_scheme);
 
         // Create shell provider
-        let shell_provider = BlitzShellProvider::new(winit_window.clone());
+        let shell_provider = BlitzShellProvider::new(winit_window.clone(), proxy.clone());
 
         let mut doc = config.doc;
         let mut inner = doc.inner_mut();
@@ -631,7 +631,8 @@ impl<Rend: WindowRenderer> View<Rend> {
                     button: Default::default(),
                     buttons: self.buttons,
                     mods: winit_modifiers_to_kbt_modifiers(self.keyboard_modifiers.state()),
-                    details: pointer_source_to_blitz_details(&source)
+                    details: pointer_source_to_blitz_details(&source),
+                    element: Default::default()
                 });
                 self.doc.handle_ui_event(event);
             }
@@ -663,7 +664,8 @@ impl<Rend: WindowRenderer> View<Rend> {
                         button: Default::default(),
                         buttons: self.buttons,
                         mods: winit_modifiers_to_kbt_modifiers(self.keyboard_modifiers.state()),
-                        details: PointerDetails::default()
+                        details: PointerDetails::default(),
+                        element: Default::default()
                     });
                     self.doc.handle_ui_event(event);
                 }
@@ -678,6 +680,7 @@ impl<Rend: WindowRenderer> View<Rend> {
 
                     // TODO: details for pointer up/down events
                     details: PointerDetails::default(),
+                    element: Default::default()
                 };
 
                 let event = match state {
