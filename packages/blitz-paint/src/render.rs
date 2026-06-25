@@ -220,9 +220,11 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // TODO: account for overflow_x vs overflow_y
         let overflow_x = styles.get_box().overflow_x;
         let overflow_y = styles.get_box().overflow_y;
+        // 注意:用 image_data() 而非 raster_image_data(),否则 SVG <img> 不会进入
+        // 裁剪层,border-radius 圆角对 SVG 图片失效(画成方角)。
         let is_image = node
             .element_data()
-            .and_then(|e| e.raster_image_data())
+            .and_then(|e| e.image_data())
             .is_some();
         let is_sub_doc = node
             .element_data()
