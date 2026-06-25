@@ -37,7 +37,7 @@ use style::{
     },
 };
 
-use kurbo::{self, Affine, BezPath, Insets, Point, Rect, Shape, Size, Stroke, Vec2};
+use kurbo::{self, Affine, BezPath, Cap, Insets, Point, Rect, Shape, Size, Stroke, Vec2};
 use peniko::{self, Fill, ImageData, ImageSampler};
 use style::values::generics::color::{ColorOrAuto, GenericColor};
 use taffy::Layout;
@@ -863,19 +863,68 @@ impl ElementCx<'_, '_> {
         ];
         let mut count = 0;
 
-        for &edge in &[Edge::Top, Edge::Right, Edge::Bottom, Edge::Left] {
-            let color = match edge {
-                Edge::Top => &border.border_top_color,
-                Edge::Right => &border.border_right_color,
-                Edge::Bottom => &border.border_bottom_color,
-                Edge::Left => &border.border_left_color,
-            }
-            .resolve_to_absolute(&current_color)
-            .as_srgb_color();
+        // 预解析四条边的 (颜色, 样式, 边宽)。
+        let bw = self.frame.border_width;
+        let edge_info = |edge: Edge| -> (Color, BorderStyle, f64) {
+            let (color, edge_style, width) = match edge {
+                Edge::Top => (&border.border_top_color, border.border_top_style, bw.y0),
+                Edge::Right => (&border.border_right_color, border.border_right_style, bw.x1),
+                Edge::Bottom => (&border.border_bottom_color, border.border_bottom_style, bw.y1),
+                Edge::Left => (&border.border_left_color, border.border_left_style, bw.x0),
+            };
+            (
+                color.resolve_to_absolute(&current_color).as_srgb_color(),
+                edge_style,
+                width,
+            )
+        };
 
-            if color.components[3] > 0.0 {
-                borders[count] = (color, Some(self.frame.border_edge_shape(edge)));
-                count += 1;
+        // 当四条边都是「相同」的 dashed/dotted(同样式/同色/同宽)时,沿整圈闭合中线
+        // 一次性描边:虚线能连续绕过 border-radius 圆角,且角点不会因相邻边各自描边而
+        // 重叠出十字。非一致(各边颜色/样式不同)的情况再退回逐边直线描边。
+        let first = edge_info(Edge::Top);
+        let all_uniform_dashy = matches!(first.1, BorderStyle::Dashed | BorderStyle::Dotted)
+            && first.0.components[3] > 0.0
+            && [Edge::Right, Edge::Bottom, Edge::Left].iter().all(|&e| {
+                let (c, s, w) = edge_info(e);
+                c == first.0 && s == first.1 && w == first.2
+            });
+        if all_uniform_dashy {
+            let path = self.frame.border_centerline_path();
+            self.stroke_dashed_path(
+                scene,
+                &path,
+                first.0,
+                first.2,
+                first.1 == BorderStyle::Dotted,
+            );
+            return;
+        }
+
+        for &edge in &[Edge::Top, Edge::Right, Edge::Bottom, Edge::Left] {
+            let (color, edge_style, _) = edge_info(edge);
+
+            if color.components[3] <= 0.0 {
+                continue;
+            }
+
+            match edge_style {
+                // Border isn't painted at all for these styles.
+                BorderStyle::None | BorderStyle::Hidden => {}
+                // Dashed/dotted边框单独走描边路径(沿边框中线按虚线模式描边)。
+                BorderStyle::Dashed | BorderStyle::Dotted => {
+                    self.stroke_dashed_border_edge(
+                        scene,
+                        edge,
+                        color,
+                        edge_style == BorderStyle::Dotted,
+                    );
+                }
+                // 其余样式(Solid/Double/Groove/...)沿用填充梯形的实现。
+                _ => {
+                    borders[count] = (color, Some(self.frame.border_edge_shape(edge)));
+                    count += 1;
+                }
             }
         }
 
@@ -915,6 +964,80 @@ impl ElementCx<'_, '_> {
             }
             start_border_index = next_border_index;
         }
+    }
+
+    /// 描边绘制单条 dashed / dotted 边框(直边,不含圆角)。
+    ///
+    /// 做法:沿该边框的中线(border-box 内缩半个边宽)画一条直线,交给
+    /// [`stroke_dashed_path`] 按虚线模式描边。圆角统一由 [`draw_border`] 里
+    /// 「四边一致」的整圈中线路径处理,所以这里只处理直线段即可。
+    fn stroke_dashed_border_edge(
+        &self,
+        scene: &mut impl PaintScene,
+        edge: Edge,
+        color: Color,
+        dotted: bool,
+    ) {
+        let bb = self.frame.border_box;
+        let bw = self.frame.border_width;
+
+        // (起点, 终点, 该边的边框宽度)
+        let (p0, p1, width) = match edge {
+            Edge::Top => {
+                let y = bb.y0 + bw.y0 / 2.0;
+                (Point::new(bb.x0, y), Point::new(bb.x1, y), bw.y0)
+            }
+            Edge::Bottom => {
+                let y = bb.y1 - bw.y1 / 2.0;
+                (Point::new(bb.x0, y), Point::new(bb.x1, y), bw.y1)
+            }
+            Edge::Left => {
+                let x = bb.x0 + bw.x0 / 2.0;
+                (Point::new(x, bb.y0), Point::new(x, bb.y1), bw.x0)
+            }
+            Edge::Right => {
+                let x = bb.x1 - bw.x1 / 2.0;
+                (Point::new(x, bb.y0), Point::new(x, bb.y1), bw.x1)
+            }
+        };
+
+        if width <= 0.0 {
+            return;
+        }
+
+        let mut line = BezPath::new();
+        line.move_to(p0);
+        line.line_to(p1);
+
+        self.stroke_dashed_path(scene, &line, color, width, dotted);
+    }
+
+    /// 以给定边宽和颜色对一条路径做虚线描边。
+    ///
+    /// dash 模式近似浏览器:dotted 为「点 间隔」≈ 边宽并用圆头(round)成圆点;
+    /// dashed 为「划 间隔」≈ 3 倍边宽并用平头(butt)。
+    fn stroke_dashed_path(
+        &self,
+        scene: &mut impl PaintScene,
+        path: &BezPath,
+        color: Color,
+        width: f64,
+        dotted: bool,
+    ) {
+        if width <= 0.0 {
+            return;
+        }
+
+        let (dashes, cap): (Vec<f64>, Cap) = if dotted {
+            // 圆点:dash「实」段长度趋近 0,靠圆头(round)的两个半圆拼成一个直径=边宽的圆点;
+            // 「虚」段取约 2 倍边宽,使点心间距≈2*width(点边缘间隔≈一个 width),贴近浏览器。
+            (vec![width * 0.01, width * 2.0], Cap::Round)
+        } else {
+            (vec![width * 3.0, width * 3.0], Cap::Butt)
+        };
+
+        let stroke = Stroke::new(width).with_caps(cap).with_dashes(0.0, dashes);
+        scene.stroke(&stroke, self.transform, color, None, path);
     }
 
     fn draw_table_borders(&self, scene: &mut impl PaintScene) {

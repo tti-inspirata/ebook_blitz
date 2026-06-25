@@ -160,6 +160,42 @@ impl CssBox {
         path
     }
 
+    /// 构造一条沿边框「中线」的闭合路径(border-box 向内缩半个边框宽度),
+    /// 跟随 border-radius 圆角。用于 dashed / dotted 边框的描边绘制,
+    /// 使虚线能正确绕过圆角。各边宽度不同的情形按各自半宽近似内缩。
+    pub fn border_centerline_path(&self) -> BezPath {
+        use Corner::*;
+
+        let bw = self.border_width;
+        let half = Insets {
+            x0: bw.x0 / 2.0,
+            y0: bw.y0 / 2.0,
+            x1: bw.x1 / 2.0,
+            y1: bw.y1 / 2.0,
+        };
+        let center_rect = self.border_box - half;
+
+        // 中线处的角半径 = 边框角半径 - 半个相邻边宽(裁剪到非负)。
+        let reduce = |r: Vec2, corner: Corner| -> Vec2 {
+            let ci = get_corner_insets(half, corner);
+            Vec2::new((r.x - ci.x).max(0.0), (r.y - ci.y).max(0.0))
+        };
+        let center_radii = NonUniformRoundedRectRadii {
+            top_left: reduce(self.border_radii.top_left, TopLeft),
+            top_right: reduce(self.border_radii.top_right, TopRight),
+            bottom_right: reduce(self.border_radii.bottom_right, BottomRight),
+            bottom_left: reduce(self.border_radii.bottom_left, BottomLeft),
+        };
+
+        // 复用 border_box_path:把中线矩形当作一个零边框的盒子,直接取其外框路径。
+        // border_box_path 生成的是「开口」路径(缺最后一条回到起点的边),
+        // 填充时靠 NonZero 自动闭合,但描边必须显式闭合,否则会丢一条边(如左边)。
+        let mut path =
+            CssBox::new(center_rect, Insets::ZERO, Insets::ZERO, 0.0, center_radii).border_box_path();
+        path.close_path();
+        path
+    }
+
     /// Construct a bezpath drawing the frame padding
     pub fn padding_box_path(&self) -> BezPath {
         let mut path = BezPath::new();
