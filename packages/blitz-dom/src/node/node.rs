@@ -198,13 +198,22 @@ impl Node {
 
     pub fn set_transform(&mut self, scale: f32) -> Option<Affine> {
         self.transform = self.primary_styles().and_then(|s| {
-            let w = self.final_layout.size.width * scale;
-            let h = self.final_layout.size.height * scale;
+            // Resolve the CSS transform in CSS pixels (unscaled reference box) so
+            // both percentage- and length-based translations come out in CSS px.
+            let w = self.final_layout.size.width;
+            let h = self.final_layout.size.height;
             let reference_box = Rect::new(
                 Point2D::new(CSSPixelLength::new(0.0), CSSPixelLength::new(0.0)),
                 Size2D::new(CSSPixelLength::new(w), CSSPixelLength::new(h)),
             );
-            crate::resolve_2d_transform(s.get_box(), reference_box)
+            let resolved = crate::resolve_2d_transform(s.get_box(), reference_box)?;
+            // The render/overflow tree operates in physical px (CSS px × scale).
+            // Re-express the transform in that space by conjugating with the scale
+            // factor: the linear part (scale/rotate/skew) is scale-invariant, only
+            // the translation must be multiplied by the scale.
+            let s = scale as f64;
+            let c = resolved.as_coeffs();
+            Some(Affine::new([c[0], c[1], c[2], c[3], c[4] * s, c[5] * s]))
         });
 
         self.transform
