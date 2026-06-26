@@ -222,6 +222,12 @@ impl ElementCx<'_, '_> {
             return;
         };
 
+        // 网格位于表格 content-box 内,绘制原点需平移到 content-box,
+        // 否则行背景会相对单元格内容偏移(同 draw_table_borders)。
+        let content_origin = self.frame.content_box.origin();
+        let transform = self.transform
+            * kurbo::Affine::translate((content_origin.x, content_origin.y));
+
         let cols = &grid_info.columns;
         let inner_width =
             (cols.sizes.iter().sum::<f32>() + cols.gutters.iter().sum::<f32>()) as f64;
@@ -250,7 +256,7 @@ impl ElementCx<'_, '_> {
 
             if bg_color != Color::TRANSPARENT {
                 // Fill the color
-                scene.fill(Fill::NonZero, self.transform, bg_color, None, &shape);
+                scene.fill(Fill::NonZero, transform, bg_color, None, &shape);
             }
 
             y += (height + gutter) as f64;

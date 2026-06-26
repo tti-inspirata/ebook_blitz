@@ -851,6 +851,15 @@ impl ElementCx<'_, '_> {
 
     /// Draw all borders for a node
     fn draw_border(&self, scene: &mut impl PaintScene) {
+        // collapse 表格的边框由 draw_table_borders 统一处理(单元格边框已合并,
+        // 外框还需遵循 overflow 裁剪、忽略 border-radius 等浏览器行为),这里不再
+        // 用通用逻辑重复绘制表格自身的 border,否则会画出主流浏览器不显示的外框。
+        if let SpecialElementData::TableRoot(table) = &self.element.special_data {
+            if table.border_collapse == BorderCollapse::Collapse {
+                return;
+            }
+        }
+
         let style = &*self.style;
         let border = style.get_border();
         let current_color = style.clone_color();
@@ -1058,6 +1067,13 @@ impl ElementCx<'_, '_> {
 
         let outer_border_style = self.style.get_border();
 
+        // 网格(单元格)布局位于表格的 content-box 内(被表格自身的 border/padding 内缩),
+        // 而下面的 Rect 坐标是相对网格原点的。需把绘制原点平移到 content-box,
+        // 否则边框线会相对单元格内容整体偏移(约表格 border 宽),与表头背景错位。
+        let content_origin = self.frame.content_box.origin();
+        let transform = self.transform
+            * Affine::translate((content_origin.x, content_origin.y));
+
         let cols = &grid_info.columns;
         let rows = &grid_info.rows;
 
@@ -1066,66 +1082,118 @@ impl ElementCx<'_, '_> {
         let inner_height =
             (rows.sizes.iter().sum::<f32>() + rows.gutters.iter().sum::<f32>()) as f64;
 
-        // TODO: support different colors for different borders
         let current_color = self.style.clone_color();
-        let border_color = border_style
-            .border_top_color
-            .resolve_to_absolute(&current_color)
-            .as_srgb_color();
+        let resolve = |color: &style::values::computed::Color| {
+            color.resolve_to_absolute(&current_color).as_srgb_color()
+        };
+        // border-style 为 none/hidden 时视为无边框(CSS 下 border-width 计算值为 0,
+        // 但 stylo 的 clone_border 仍给 medium=3px,需按样式归零)。
+        let visible = |s: BorderStyle| !matches!(s, BorderStyle::None | BorderStyle::Hidden);
 
-        // No need to draw transparent borders (as they won't be visible anyway)
-        if border_color == Color::TRANSPARENT {
-            return;
-        }
-
-        let border_width = border_style.border_top_width.0.to_f64_px();
+        // 内部网格线由单元格边框决定(collapse 模式下单元格自身边框被清零,
+        // 改在表级统一绘制)。水平线优先取单元格 border-bottom、退回 border-top;
+        // 垂直线优先取 border-right、退回 border-left。无可见边框的方向不绘制,
+        // 这样只设 border-bottom 的单元格不会画出多余的竖线。
+        let h_inner = if visible(border_style.border_bottom_style) {
+            Some(resolve(&border_style.border_bottom_color))
+        } else if visible(border_style.border_top_style) {
+            Some(resolve(&border_style.border_top_color))
+        } else {
+            None
+        };
+        let v_inner = if visible(border_style.border_right_style) {
+            Some(resolve(&border_style.border_right_color))
+        } else if visible(border_style.border_left_style) {
+            Some(resolve(&border_style.border_left_color))
+        } else {
+            None
+        };
 
         // Draw horizontal inner borders
-        let mut y = 0.0;
-        for (&height, &gutter) in rows.sizes.iter().zip(rows.gutters.iter()) {
-            let shape =
-                Rect::new(0.0, y, inner_width, y + gutter as f64).scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
+        if let Some(color) = h_inner.filter(|c| c.components[3] > 0.0) {
+            let mut y = 0.0;
+            for (&height, &gutter) in rows.sizes.iter().zip(rows.gutters.iter()) {
+                let shape =
+                    Rect::new(0.0, y, inner_width, y + gutter as f64).scale_from_origin(self.scale);
+                scene.fill(Fill::NonZero, transform, color, None, &shape);
 
-            y += (height + gutter) as f64;
-        }
-
-        // Draw horizontal outer borders
-        // Top border
-        if outer_border_style.border_top_style != BorderStyle::Hidden {
-            let shape =
-                Rect::new(0.0, 0.0, inner_width, border_width).scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
-        }
-        // Bottom border
-        if outer_border_style.border_bottom_style != BorderStyle::Hidden {
-            let shape = Rect::new(0.0, inner_height, inner_width, inner_height + border_width)
-                .scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
+                y += (height + gutter) as f64;
+            }
         }
 
         // Draw vertical inner borders
-        let mut x = 0.0;
-        for (&width, &gutter) in cols.sizes.iter().zip(cols.gutters.iter()) {
-            let shape =
-                Rect::new(x, 0.0, x + gutter as f64, inner_height).scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
+        if let Some(color) = v_inner.filter(|c| c.components[3] > 0.0) {
+            let mut x = 0.0;
+            for (&width, &gutter) in cols.sizes.iter().zip(cols.gutters.iter()) {
+                let shape = Rect::new(x, 0.0, x + gutter as f64, inner_height)
+                    .scale_from_origin(self.scale);
+                scene.fill(Fill::NonZero, transform, color, None, &shape);
 
-            x += (width + gutter) as f64;
+                x += (width + gutter) as f64;
+            }
         }
 
-        // Draw vertical outer borders
+        // 外框使用表格自身的 border(各边独立的颜色/宽度/样式),而不是套用
+        // 单元格边框——这样 `table{border:1px solid ...}` 才能正确显示。
+        //
+        // 但 collapse 模式下合并外框是「骑」在表格边线上绘制(外侧一半在 border-box 之外),
+        // 当表格 overflow 非 visible 时,主流浏览器(Chrome/Edge/Safari)会把这外侧部分裁掉,
+        // 外框因而几乎不可见。为与主流浏览器一致,这种情况下不绘制合并外框
+        // (内部网格线属于内容区,不受影响,照常绘制)。
+        let box_styles = self.style.get_box();
+        let clips_overflow = !matches!(box_styles.overflow_x, Overflow::Visible)
+            || !matches!(box_styles.overflow_y, Overflow::Visible);
+
+        let outer_edge = |style: BorderStyle, width: f64, color: &style::values::computed::Color| {
+            if clips_overflow {
+                return None;
+            }
+            if width <= 0.0
+                || matches!(style, BorderStyle::None | BorderStyle::Hidden)
+            {
+                return None;
+            }
+            let c = resolve(color);
+            (c.components[3] > 0.0).then_some((c, width))
+        };
+
+        // Top border
+        if let Some((color, w)) = outer_edge(
+            outer_border_style.border_top_style,
+            outer_border_style.border_top_width.0.to_f64_px(),
+            &outer_border_style.border_top_color,
+        ) {
+            let shape = Rect::new(0.0, 0.0, inner_width, w).scale_from_origin(self.scale);
+            scene.fill(Fill::NonZero, transform, color, None, &shape);
+        }
+        // Bottom border
+        if let Some((color, w)) = outer_edge(
+            outer_border_style.border_bottom_style,
+            outer_border_style.border_bottom_width.0.to_f64_px(),
+            &outer_border_style.border_bottom_color,
+        ) {
+            let shape = Rect::new(0.0, inner_height, inner_width, inner_height + w)
+                .scale_from_origin(self.scale);
+            scene.fill(Fill::NonZero, transform, color, None, &shape);
+        }
         // Left border
-        if outer_border_style.border_left_style != BorderStyle::Hidden {
-            let shape =
-                Rect::new(0.0, 0.0, border_width, inner_height).scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
+        if let Some((color, w)) = outer_edge(
+            outer_border_style.border_left_style,
+            outer_border_style.border_left_width.0.to_f64_px(),
+            &outer_border_style.border_left_color,
+        ) {
+            let shape = Rect::new(0.0, 0.0, w, inner_height).scale_from_origin(self.scale);
+            scene.fill(Fill::NonZero, transform, color, None, &shape);
         }
         // Right border
-        if outer_border_style.border_right_style != BorderStyle::Hidden {
-            let shape = Rect::new(inner_width, 0.0, inner_width + border_width, inner_height)
+        if let Some((color, w)) = outer_edge(
+            outer_border_style.border_right_style,
+            outer_border_style.border_right_width.0.to_f64_px(),
+            &outer_border_style.border_right_color,
+        ) {
+            let shape = Rect::new(inner_width, 0.0, inner_width + w, inner_height)
                 .scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
+            scene.fill(Fill::NonZero, transform, color, None, &shape);
         }
     }
 

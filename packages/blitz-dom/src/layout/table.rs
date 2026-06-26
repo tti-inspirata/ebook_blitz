@@ -18,6 +18,31 @@ use crate::BaseDocument;
 use super::damage::{CONSTRUCT_BOX, CONSTRUCT_DESCENDENT, CONSTRUCT_FC};
 use super::resolve_calc_value;
 
+#[derive(Clone, Copy)]
+enum BorderSide {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+/// 返回该边的有效边宽(CSS px):若 border-style 为 none/hidden 则为 0,
+/// 否则取 border-width。用于 collapse 模式下计算单元格间隙。
+fn effective_border_width(border: &Border, side: BorderSide) -> f32 {
+    use style::values::specified::BorderStyle;
+    let (style, width) = match side {
+        BorderSide::Top => (border.border_top_style, &border.border_top_width),
+        BorderSide::Right => (border.border_right_style, &border.border_right_width),
+        BorderSide::Bottom => (border.border_bottom_style, &border.border_bottom_width),
+        BorderSide::Left => (border.border_left_style, &border.border_left_width),
+    };
+    if matches!(style, BorderStyle::None | BorderStyle::Hidden) {
+        0.0
+    } else {
+        width.0.to_f32_px()
+    }
+}
+
 pub struct TableTreeWrapper<'doc> {
     pub(crate) doc: &'doc mut BaseDocument,
     pub(crate) ctx: Arc<TableContext>,
@@ -120,16 +145,13 @@ pub(crate) fn build_table_context(
         BorderCollapse::Collapse => first_cell_border
             .as_ref()
             .map(|border| {
-                let x = border
-                    .border_left_width
-                    .0
-                    .max(border.border_right_width.0)
-                    .to_f32_px();
-                let y = border
-                    .border_top_width
-                    .0
-                    .max(border.border_bottom_width.0)
-                    .to_f32_px();
+                // CSS:border-style 为 none/hidden 时 border-width 计算值为 0。
+                // stylo 的 clone_border() 仍返回 medium(3px),这里按样式归零,
+                // 否则只设了 border-bottom 的单元格也会撑出 3px 的左右/上间隙。
+                let x = effective_border_width(border, BorderSide::Left)
+                    .max(effective_border_width(border, BorderSide::Right));
+                let y = effective_border_width(border, BorderSide::Top)
+                    .max(effective_border_width(border, BorderSide::Bottom));
                 taffy::Size {
                     width: style_helpers::length(x),
                     height: style_helpers::length(y),
