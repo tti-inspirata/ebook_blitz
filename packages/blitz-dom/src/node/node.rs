@@ -120,6 +120,9 @@ pub struct Node {
     // Pseudo element nodes
     pub before: Option<usize>,
     pub after: Option<usize>,
+    /// `::first-letter` pseudo element (a synthesised floating/inline box holding
+    /// the first typographic letter of the element's first formatted line).
+    pub first_letter: Option<usize>,
 
     // Taffy layout data:
     pub style: Style<Atom>,
@@ -180,6 +183,7 @@ impl Node {
 
             before: None,
             after: None,
+            first_letter: None,
 
             style: Default::default(),
             has_snapshot: false,
@@ -223,6 +227,7 @@ impl Node {
         match index {
             0 => self.after,
             1 => self.before,
+            3 => self.first_letter,
             _ => panic!("Invalid pseudo element index"),
         }
     }
@@ -231,6 +236,7 @@ impl Node {
         match index {
             0 => self.after = value,
             1 => self.before = value,
+            3 => self.first_letter = value,
             _ => panic!("Invalid pseudo element index"),
         }
     }

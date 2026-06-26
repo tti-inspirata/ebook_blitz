@@ -21,11 +21,15 @@ macro_rules! iter_children_and_pseudos {
         // Load node
         let node = &mut $node_expr;
 
-        // Copy before, after, and take children
+        // Copy first_letter, before, after, and take children
+        let first_letter = node.first_letter;
         let before = node.before;
         let after = node.after;
         let children = core::mem::take(&mut node.children);
 
+        if let Some(first_letter) = first_letter {
+            $cb(first_letter)
+        }
         if let Some(before) = before {
             $cb(before)
         }
@@ -199,6 +203,12 @@ impl BaseDocument {
         node_id: usize,
         mut cb: impl FnMut(usize, &mut BaseDocument),
     ) {
+        let first_letter = self.nodes[node_id].first_letter.take();
+        if let Some(first_letter_node_id) = first_letter {
+            cb(first_letter_node_id, self)
+        }
+        self.nodes[node_id].first_letter = first_letter;
+
         let before = self.nodes[node_id].before.take();
         if let Some(before_node_id) = before {
             cb(before_node_id, self)

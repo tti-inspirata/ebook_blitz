@@ -57,6 +57,9 @@ impl BaseDocument {
             for child in children.iter() {
                 damage |= self.propagate_damage_flags(*child, damage_for_children);
             }
+            if let Some(first_letter_id) = self.nodes[node_id].first_letter {
+                damage |= self.propagate_damage_flags(first_letter_id, damage_for_children);
+            }
             if let Some(before_id) = self.nodes[node_id].before {
                 damage |= self.propagate_damage_flags(before_id, damage_for_children);
             }

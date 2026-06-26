@@ -103,6 +103,7 @@ pub(crate) fn collect_layout_children(
     }
 
     flush_pseudo_elements(doc, container_node_id);
+    flush_first_letter(doc, container_node_id);
 
     if let Some(el) = doc.nodes[container_node_id].data.downcast_element() {
         // Handle text inputs
@@ -489,6 +490,139 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
     }
 }
 
+/// The byte range, within a text node's content, of the `::first-letter`
+/// typographic unit: any leading opening punctuation plus the first base
+/// character. Leading whitespace is skipped. Returns `(unit_end_byte, unit_string)`
+/// where `unit_end_byte` is the offset *after* the unit (everything before it —
+/// leading whitespace included — is consumed by the pseudo element).
+fn first_letter_in_str(s: &str) -> Option<(usize, String)> {
+    // Find first non-whitespace char.
+    let start = s.char_indices().find_map(|(i, c)| (!c.is_whitespace()).then_some(i))?;
+
+    let mut end = start;
+    let mut got_letter = false;
+    for (i, c) in s[start..].char_indices() {
+        let is_punct = !c.is_alphanumeric() && !c.is_whitespace();
+        end = start + i + c.len_utf8();
+        if !is_punct {
+            got_letter = true;
+            break;
+        }
+    }
+
+    got_letter.then(|| (end, s[start..end].to_string()))
+}
+
+/// Locate the first in-flow text leaf of an inline-context root and the
+/// `::first-letter` unit within it. Out-of-flow (floated/absolute) and
+/// `display:none` subtrees are skipped, matching where a first letter may appear.
+fn find_first_letter_unit(nodes: &Slab<Node>, root_id: usize) -> Option<(usize, usize, String)> {
+    fn walk(nodes: &Slab<Node>, node_id: usize) -> Option<(usize, usize, String)> {
+        let node = &nodes[node_id];
+        match &node.data {
+            NodeData::Text(data) => {
+                first_letter_in_str(&data.content).map(|(end, s)| (node_id, end, s))
+            }
+            NodeData::Element(_) | NodeData::AnonymousBlock(_) => {
+                if let Some(style) = node.primary_styles() {
+                    if style.clone_display().outside() == DisplayOutside::None
+                        || style.clone_float().is_floating()
+                        || style.clone_position().is_absolutely_positioned()
+                    {
+                        return None;
+                    }
+                }
+                node.children
+                    .iter()
+                    .copied()
+                    .find_map(|child| walk(nodes, child))
+            }
+            _ => None,
+        }
+    }
+
+    nodes[root_id]
+        .children
+        .iter()
+        .copied()
+        .find_map(|child| walk(nodes, child))
+}
+
+/// Synchronise the `::first-letter` pseudo element for `node_id`, mirroring
+/// [`flush_pseudo_elements`] but sourcing its content by splitting the first
+/// typographic letter off the element's first formatted text.
+fn flush_first_letter(doc: &mut BaseDocument, node_id: usize) {
+    let fl_style = {
+        let style_data = doc.nodes[node_id].stylo_element_data.get();
+        style_data
+            .as_ref()
+            .and_then(|d| d.styles.pseudos.as_array()[3].clone())
+    };
+
+    let existing = doc.nodes[node_id].first_letter;
+    let unit = fl_style
+        .as_ref()
+        .and_then(|_| find_first_letter_unit(&doc.nodes, node_id))
+        .map(|(_, _, letter)| letter);
+
+    match (existing, fl_style, unit) {
+        // Delete pseudo element if it exists but no longer should
+        (Some(pe_id), None, _) | (Some(pe_id), Some(_), None) => {
+            doc.remove_and_drop_pe(pe_id);
+            let node = &mut doc.nodes[node_id];
+            node.set_pe_by_index(3, None);
+            node.insert_damage(ALL_DAMAGE);
+        }
+        // Create pseudo element if it should exist but doesn't
+        (None, Some(fl_style), Some(letter)) => {
+            let new_node_id = doc.create_node(NodeData::AnonymousBlock(ElementData::new(
+                DUMMY_NAME,
+                Vec::new(),
+            )));
+            doc.nodes[new_node_id].parent = Some(node_id);
+            doc.nodes[new_node_id].layout_parent.set(Some(node_id));
+            if doc.nodes[node_id].flags.contains(NodeFlags::IS_IN_DOCUMENT) {
+                doc.nodes[new_node_id]
+                    .flags
+                    .insert(NodeFlags::IS_IN_DOCUMENT);
+            }
+
+            let text_node_id = doc.create_text_node(&letter);
+            doc.nodes[new_node_id].children.push(text_node_id);
+
+            let mut element_data = StyloElementData::default();
+            element_data.styles.primary = Some(fl_style);
+            element_data.set_restyled();
+            element_data.damage = ALL_DAMAGE;
+            *doc.nodes[new_node_id].stylo_element_data.ensure_init_mut() = element_data;
+
+            let node = &mut doc.nodes[node_id];
+            node.set_pe_by_index(3, Some(new_node_id));
+            node.insert_damage(ALL_DAMAGE);
+        }
+        // Update existing pseudo element (content + style)
+        (Some(pe_id), Some(fl_style), Some(letter)) => {
+            if let Some(&text_node_id) = doc.nodes[pe_id].children.first() {
+                if let Some(data) = doc.nodes[text_node_id].text_data_mut() {
+                    if data.content != letter {
+                        data.content = letter;
+                    }
+                }
+            }
+
+            let mut node_styles = doc.nodes[pe_id].stylo_element_data.get_mut();
+            let node_styles = node_styles.as_mut().unwrap();
+            node_styles.damage.insert(ALL_DAMAGE);
+            let primary_styles = &mut node_styles.styles.primary;
+            if !std::ptr::eq(&**primary_styles.as_ref().unwrap(), &*fl_style) {
+                *primary_styles = Some(fl_style);
+                node_styles.set_restyled();
+            }
+        }
+        (None, _, _) => {}
+    }
+}
+
 /// Handles the cases where there are text nodes or inline nodes that need to be wrapped in an anonymous block node
 fn collect_complex_layout_children(
     doc: &mut BaseDocument,
@@ -823,6 +957,24 @@ pub(crate) fn build_inline_layout_into(
         }
     };
 
+    // `::first-letter`: emit the synthesised floating/inline box first, and
+    // remember which original text leaf (and how many leading bytes) the pseudo
+    // consumed so it can be skipped when that text is emitted below.
+    let first_letter_skip = root_node.first_letter.and_then(|fl_id| {
+        let (text_node_id, unit_end, _) = find_first_letter_unit(nodes, inline_context_root_node_id)?;
+        build_inline_layout_recursive(
+            &mut builder,
+            nodes,
+            inline_context_root_node_id,
+            fl_id,
+            collapse_mode,
+            text_transform,
+            root_line_height,
+            None,
+        );
+        Some((text_node_id, unit_end))
+    });
+
     if let Some(before_id) = root_node.before {
         build_inline_layout_recursive(
             &mut builder,
@@ -832,6 +984,7 @@ pub(crate) fn build_inline_layout_into(
             collapse_mode,
             text_transform,
             root_line_height,
+            first_letter_skip,
         );
     }
     for child_id in root_node.children.iter().copied() {
@@ -843,6 +996,7 @@ pub(crate) fn build_inline_layout_into(
             collapse_mode,
             text_transform,
             root_line_height,
+            first_letter_skip,
         );
     }
     if let Some(after_id) = root_node.after {
@@ -854,12 +1008,14 @@ pub(crate) fn build_inline_layout_into(
             collapse_mode,
             text_transform,
             root_line_height,
+            first_letter_skip,
         );
     }
 
     text_layout.text = builder.build_into(&mut text_layout.layout);
     return;
 
+    #[allow(clippy::too_many_arguments)]
     fn build_inline_layout_recursive(
         builder: &mut TreeBuilder<TextBrush>,
         nodes: &Slab<Node>,
@@ -868,6 +1024,9 @@ pub(crate) fn build_inline_layout_into(
         collapse_mode: WhiteSpaceCollapse,
         parent_text_transform: TextTransform,
         root_line_height: f32,
+        // `Some((text_node_id, byte_offset))` when a `::first-letter` pseudo has
+        // consumed the leading `byte_offset` bytes of that text node.
+        first_letter_skip: Option<(usize, usize)>,
     ) {
         let node = &nodes[node_id];
 
@@ -925,6 +1084,7 @@ pub(crate) fn build_inline_layout_into(
                                 collapse_mode,
                                 text_transform,
                                 root_line_height,
+                                first_letter_skip,
                             );
                         }
                     }
@@ -986,6 +1146,7 @@ pub(crate) fn build_inline_layout_into(
                                     collapse_mode,
                                     text_transform,
                                     root_line_height,
+                                    first_letter_skip,
                                 );
                             }
 
@@ -998,6 +1159,7 @@ pub(crate) fn build_inline_layout_into(
                                     collapse_mode,
                                     text_transform,
                                     root_line_height,
+                                    first_letter_skip,
                                 );
                             }
                             if let Some(after_id) = node.after {
@@ -1009,6 +1171,7 @@ pub(crate) fn build_inline_layout_into(
                                     collapse_mode,
                                     text_transform,
                                     root_line_height,
+                                    first_letter_skip,
                                 );
                             }
 
@@ -1033,16 +1196,23 @@ pub(crate) fn build_inline_layout_into(
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 // dbg!(&data.content);
 
+                // Drop the leading bytes consumed by a `::first-letter` pseudo on
+                // this text leaf (leading whitespace + the first typographic unit).
+                let content = match first_letter_skip {
+                    Some((fl_node_id, skip)) if fl_node_id == node_id => &data.content[skip..],
+                    _ => &data.content[..],
+                };
+
                 // TODO: optimize case transforms to be non-allocating
                 match parent_text_transform {
                     TextTransform::UPPERCASE => {
-                        builder.push_text(&data.content.to_uppercase());
+                        builder.push_text(&content.to_uppercase());
                     }
                     TextTransform::LOWERCASE => {
-                        builder.push_text(&data.content.to_lowercase());
+                        builder.push_text(&content.to_lowercase());
                     }
                     _ => {
-                        builder.push_text(&data.content);
+                        builder.push_text(content);
                     }
                 }
             }

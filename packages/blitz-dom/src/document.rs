@@ -751,6 +751,9 @@ impl BaseDocument {
     pub(crate) fn drop_node_ignoring_parent(&mut self, node_id: usize) -> Option<Node> {
         let mut node = self.nodes.try_remove(node_id);
         if let Some(node) = &mut node {
+            if let Some(first_letter) = node.first_letter {
+                self.drop_node_ignoring_parent(first_letter);
+            }
             if let Some(before) = node.before {
                 self.drop_node_ignoring_parent(before);
             }

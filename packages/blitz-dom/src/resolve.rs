@@ -154,6 +154,10 @@ impl BaseDocument {
                 overflow = overflow.union(child_rect_in_self);
             }
         }
+        if let Some(first_letter) = self.nodes[node_id].first_letter {
+            let child_rect_in_self = self.resolve_transforms(first_letter);
+            overflow = overflow.union(child_rect_in_self);
+        }
         if let Some(before) = self.nodes[node_id].before {
             let child_rect_in_self = self.resolve_transforms(before);
             overflow = overflow.union(child_rect_in_self);
