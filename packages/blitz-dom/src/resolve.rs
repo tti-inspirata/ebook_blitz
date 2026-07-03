@@ -20,17 +20,17 @@ thread_local! {
     pub(crate) static LAYOUT_CTX: RefCell<Option<Box<LayoutContext<TextBrush>>>> = const { RefCell::new(None) };
 }
 
-#[cfg(feature = "incremental")]
 use style::selector_parser::RestyleDamage;
 use taffy::AvailableSpace;
 
 use crate::{
-    BaseDocument, NON_INCREMENTAL,
+    BaseDocument,
     events::ScrollAnimationState,
     layout::{
         construct::{
             ConstructionTask, ConstructionTaskData, ConstructionTaskResult,
-            ConstructionTaskResultData, build_inline_layout_into, collect_layout_children,
+            ConstructionTaskResultData, LayoutChildren, build_inline_layout_into,
+            collect_layout_children,
         },
         damage::{ALL_DAMAGE, CONSTRUCT_BOX, CONSTRUCT_DESCENDENT, CONSTRUCT_FC},
     },
@@ -55,17 +55,17 @@ impl BaseDocument {
         self.resolve_scroll_animation();
 
         let root_node_id = self.root_element().id;
-        debug_timer!(timer, feature = "log_phase_times");
+        debug_timer!(timer, feature = "log-phase-times");
 
         // we need to resolve stylist first since it will need to drive our layout bits
         self.resolve_stylist(current_time_for_animations);
         timer.record_time("style");
 
         // Propagate damage flags (from mutation and restyles) up and down the tree
-        #[cfg(feature = "incremental")]
-        self.propagate_damage_flags(root_node_id, RestyleDamage::empty());
-        #[cfg(feature = "incremental")]
-        timer.record_time("damage");
+        if self.incremental_layout {
+            self.propagate_damage_flags(root_node_id, RestyleDamage::empty());
+            timer.record_time("damage");
+        }
 
         // Fix up tree for layout (insert anonymous blocks as necessary, etc)
         self.resolve_layout_children();
@@ -86,8 +86,7 @@ impl BaseDocument {
         timer.record_time("transform");
 
         // Clear all damage and dirty flags
-        #[cfg(feature = "incremental")]
-        {
+        if self.incremental_layout {
             for (_, node) in self.nodes.iter_mut() {
                 node.clear_damage_mut();
                 node.unset_dirty_descendants();
@@ -224,11 +223,11 @@ impl BaseDocument {
             let mut damage = doc.nodes[node_id].damage().unwrap_or(ALL_DAMAGE);
             let _flags = doc.nodes[node_id].flags;
 
-            if NON_INCREMENTAL || damage.intersects(CONSTRUCT_FC | CONSTRUCT_BOX) {
+            if !doc.incremental_layout || damage.intersects(CONSTRUCT_FC | CONSTRUCT_BOX) {
                 //} || flags.contains(NodeFlags::IS_INLINE_ROOT) {
-                let mut layout_children = Vec::new();
-                let mut anonymous_block: Option<usize> = None;
-                collect_layout_children(doc, node_id, &mut layout_children, &mut anonymous_block);
+                let mut collected = LayoutChildren::default();
+                collect_layout_children(doc, node_id, &mut collected);
+                let layout_children = collected.children;
 
                 // Recurse into newly collected layout children
                 for child_id in layout_children.iter().copied() {

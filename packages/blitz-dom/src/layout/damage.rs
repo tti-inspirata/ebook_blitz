@@ -1,11 +1,11 @@
 use std::ops::Range;
 
+use crate::Node;
 use crate::net::ResourceHandler;
 use crate::node::NodeFlags;
 use crate::{
     BaseDocument, net::ImageHandler, node::ImageResourceData, node::Status, util::ImageLayerKind,
 };
-use crate::{NON_INCREMENTAL, Node};
 use style::properties::ComputedValues;
 use style::properties::generated::longhands::position::computed_value::T as Position;
 use style::selector_parser::RestyleDamage;
@@ -31,7 +31,6 @@ pub(crate) const ALL_DAMAGE: RestyleDamage =
     RestyleDamage::from_bits_retain(0b_0000_0000_0111_1111);
 
 impl BaseDocument {
-    #[cfg(feature = "incremental")]
     pub(crate) fn propagate_damage_flags(
         &mut self,
         node_id: usize,
@@ -43,6 +42,12 @@ impl BaseDocument {
             return RestyleDamage::empty();
         };
         damage |= damage_from_parent;
+
+        // Flush updated pseudo-element styles to their anonymous nodes so that
+        // style changes which don't trigger box construction still take effect.
+        //
+        // TODO: see if this can be made more efficient (/run less often)
+        self.sync_pseudo_element_styles(node_id);
 
         let damage_for_children = RestyleDamage::empty();
         let children = std::mem::take(&mut self.nodes[node_id].children);
@@ -114,6 +119,61 @@ impl BaseDocument {
 
         // Propagate damage to parent
         damage_for_parent
+    }
+
+    /// Flush updated pseudo-element (`::before`/`::after`) styles from the owning
+    /// element's stylo data to the pseudo-element's anonymous node.
+    ///
+    /// Pseudo-element styles are normally flushed to the pseudo-element's node
+    /// during box construction (see `flush_pseudo_elements`), but in incremental
+    /// mode box construction only runs for nodes with construction damage.
+    /// Pseudo-element style changes which don't require reconstruction (e.g.
+    /// animations/transitions of repaint- or relayout-only properties) must still
+    /// be flushed to the pseudo-element's node - along with the damage they imply -
+    /// so that layout and paint see the new style.
+    fn sync_pseudo_element_styles(&mut self, node_id: usize) {
+        let node = &self.nodes[node_id];
+
+        let before_node_id = node.before;
+        let after_node_id = node.after;
+        if before_node_id.is_none() && after_node_id.is_none() {
+            return;
+        }
+
+        let (before_style, after_style) = {
+            let style_data = node.stylo_element_data.get();
+            let Some(style_data) = style_data.as_ref() else {
+                return;
+            };
+            // Note: yes these are kinda backwards (see `flush_pseudo_elements`)
+            let pseudos = style_data.styles.pseudos.as_array();
+            (pseudos[1].clone(), pseudos[0].clone())
+        };
+
+        // Creation and removal of pseudo-elements is handled during box construction
+        // (Stylo generates construction damage for those cases), so only the case
+        // where the pseudo-element both was and remains present is handled here.
+        for (pe_node_id, pe_style) in [(before_node_id, before_style), (after_node_id, after_style)]
+        {
+            let (Some(pe_node_id), Some(pe_style)) = (pe_node_id, pe_style) else {
+                continue;
+            };
+            let mut pe_data = self.nodes[pe_node_id].stylo_element_data.get_mut();
+            let Some(pe_data) = pe_data.as_mut() else {
+                continue;
+            };
+            let Some(old_style) = pe_data.styles.primary.clone() else {
+                continue;
+            };
+            if std::ptr::eq(&*old_style, &*pe_style) {
+                continue;
+            }
+
+            let diff = RestyleDamage::compute_style_difference::<&Node>(&old_style, &pe_style);
+            pe_data.damage.insert(diff.damage);
+            pe_data.styles.primary = Some(pe_style);
+            pe_data.set_restyled();
+        }
     }
 }
 
@@ -469,6 +529,7 @@ impl BaseDocument {
         self.flush_image_layers_from_style(node_id, ImageLayerKind::Background);
         self.flush_image_layers_from_style(node_id, ImageLayerKind::Mask);
 
+        let incremental = self.incremental_layout;
         let display = {
             let node = self.nodes.get_mut(node_id).unwrap();
             let _damage = node.damage().unwrap_or(ALL_DAMAGE);
@@ -488,7 +549,7 @@ impl BaseDocument {
 
             // In non-incremental mode we unconditionally clear the Taffy cache.
             // In incremental mode this is handled as part of damage propagation.
-            if NON_INCREMENTAL {
+            if !incremental {
                 node.cache.clear();
                 if let Some(inline_layout) = node
                     .data

@@ -1,4 +1,5 @@
 mod background;
+mod border;
 mod box_shadow;
 mod clip_path;
 mod form_controls;
@@ -7,7 +8,7 @@ mod mask;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::kurbo_css::{CssBox, Edge};
+use super::kurbo_css::CssBox;
 use crate::color::{Color, ToColorColor};
 use crate::debug_overlay::render_debug_overlay;
 use crate::filters::convert_filters;
@@ -17,15 +18,14 @@ use crate::sizing::compute_object_fit;
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
 use anyrender::{PaintScene, Scene};
 use blitz_dom::node::{
-    ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, SpecialElementData,
-    TextInputData, TextNodeData,
+    ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
+    TextNodeData,
 };
 use blitz_dom::{BaseDocument, ElementData, Node, local_name};
 use blitz_traits::devtools::DevtoolSettings;
 
-use style::values::computed::BorderCornerRadius;
+use style::values::computed::{BorderCornerRadius, ColorOrAuto};
 use style::{
-    computed_values::border_collapse::T as BorderCollapse,
     dom::TElement,
     properties::{
         ComputedValues, generated::longhands::visibility::computed_value::T as StyloVisibility,
@@ -33,13 +33,13 @@ use style::{
     },
     values::{
         computed::{CSSPixelLength, Overflow},
-        specified::{BorderStyle, OutlineStyle, image::ImageRendering},
+        specified::image::ImageRendering,
     },
 };
 
-use kurbo::{self, Affine, BezPath, Cap, Insets, Point, Rect, Shape, Size, Stroke, Vec2};
+use kurbo::{self, Affine, Insets, Point, Rect, Shape, Size, Stroke, Vec2};
 use peniko::{self, Fill, ImageData, ImageSampler};
-use style::values::generics::color::{ColorOrAuto, GenericColor};
+use style::values::generics::color::GenericColor;
 use taffy::Layout;
 
 /// A short-lived struct which holds a bunch of parameters for rendering a scene so
@@ -148,6 +148,11 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             scene.fill(Fill::NonZero, Affine::IDENTITY, bg_color, None, &rect);
         }
 
+        // The root clip rectangle is the viewport (in screen coordinates, with the
+        // initial offset already subtracted). Elements outside of this are culled, and
+        // scrollports narrow this rectangle further for their descendants.
+        let viewport_clip_rect = Rect::new(0.0, 0.0, self.width as f64, self.height as f64);
+
         self.render_element(
             scene,
             root_id,
@@ -155,6 +160,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 x: self.initial_x - (viewport_scroll.x * self.scale),
                 y: self.initial_y - (viewport_scroll.y * self.scale),
             }),
+            viewport_clip_rect,
         );
 
         // Render debug overlay
@@ -186,6 +192,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         scene: &mut impl PaintScene,
         node_id: usize,
         parent_style_transform: Affine,
+        clip_rect: Rect,
     ) {
         let node = &self.dom.as_ref().tree()[node_id];
 
@@ -267,16 +274,20 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             * Affine::translate(box_position)
             * node.transform.unwrap_or_default();
 
-        let screen_bbox = (Affine::translate(Vec2 {
+        let screen_transform = Affine::translate(Vec2 {
             x: -self.initial_x,
             y: -self.initial_y,
-        }) * transform)
-            .transform_rect_bbox(overflow.union(border_box));
+        }) * transform;
+        let screen_bbox = screen_transform.transform_rect_bbox(overflow.union(border_box));
 
-        if screen_bbox.y1 < 0.0 || screen_bbox.y0 > self.height as f64 {
-            return;
-        }
-        if screen_bbox.x1 < 0.0 || screen_bbox.x0 > self.width as f64 {
+        // Cull elements that fall entirely outside the current clip rectangle. In addition to
+        // the viewport, `clip_rect` is narrowed by any ancestor scrollport (see below), so this
+        // also culls elements scrolled out of view inside a clipping/scrolling container.
+        if screen_bbox.x1 < clip_rect.x0
+            || screen_bbox.x0 > clip_rect.x1
+            || screen_bbox.y1 < clip_rect.y0
+            || screen_bbox.y0 > clip_rect.y1
+        {
             return;
         }
 
@@ -295,6 +306,21 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // Apply CSS transform property (where transforms are 2d)
 
         let mut cx = self.element_cx(node, node.final_layout, transform, custom_widget_scene);
+
+        // If this element clips its overflow it establishes a scrollport: narrow the clip
+        // rectangle passed to descendants to the visible (clipped) region so that content
+        // scrolled out of view is culled rather than drawn and clipped away. The box used
+        // here matches the clip applied to the content below.
+        let child_clip_rect = if should_clip {
+            let clip_box = if is_text_input {
+                cx.frame.content_box_path()
+            } else {
+                cx.frame.padding_box_path()
+            };
+            clip_rect.intersect(screen_transform.transform_rect_bbox(clip_box.bounding_box()))
+        } else {
+            clip_rect
+        };
 
         // Compute clip-path (if any) and wrap all rendering in a clip layer
         let clip_path_shape = cx.clip_path_shape();
@@ -400,7 +426,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                                 cx.draw_text_input_text(scene, content_position);
                                 cx.draw_inline_layout(scene, content_position);
                                 cx.draw_marker(scene, content_position);
-                                cx.draw_children(scene, cx.transform);
+                                cx.draw_children(scene, cx.transform, child_clip_rect);
                             },
                         );
                     },
@@ -418,12 +444,13 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         scene: &mut impl PaintScene,
         node_id: usize,
         parent_style_transform: Affine,
+        clip_rect: Rect,
     ) {
         let node = &self.dom.as_ref().tree()[node_id];
 
         match &node.data {
             NodeData::Element(_) | NodeData::AnonymousBlock(_) => {
-                self.render_element(scene, node_id, parent_style_transform)
+                self.render_element(scene, node_id, parent_style_transform, clip_rect)
             }
             NodeData::Text(TextNodeData { .. }) => {
                 // Text nodes should never be rendered directly
@@ -575,8 +602,18 @@ impl ElementCx<'_, '_> {
                 y: pos.y + y_offset,
             };
 
-            let transform =
-                self.transform * Affine::translate((pos.x * self.scale, pos.y * self.scale));
+            // Apply the scroll offset (stored in CSS pixels, scaled here to device pixels) so
+            // that the caret stays visible. Single-line inputs scroll horizontally; multi-line
+            // inputs scroll vertically.
+            let scroll_offset = input_data.scroll_offset as f64 * self.scale;
+            let (scroll_x, scroll_y) = if input_data.is_multiline {
+                (0.0, scroll_offset)
+            } else {
+                (scroll_offset, 0.0)
+            };
+
+            let transform = self.transform
+                * Affine::translate((pos.x * self.scale - scroll_x, pos.y * self.scale - scroll_y));
 
             if self.node.is_focussed() {
                 // Render selection/caret
@@ -662,7 +699,12 @@ impl ElementCx<'_, '_> {
         }
     }
 
-    fn draw_children(&self, scene: &mut impl PaintScene, parent_style_transform: Affine) {
+    fn draw_children(
+        &self,
+        scene: &mut impl PaintScene,
+        parent_style_transform: Affine,
+        clip_rect: Rect,
+    ) {
         // Negative z_index hoisted nodes
 
         if let Some(hoisted) = &self.node.stacking_context {
@@ -675,6 +717,7 @@ impl ElementCx<'_, '_> {
                     scene,
                     hoisted_child.node_id,
                     parent_style_transform.pre_translate(pos),
+                    clip_rect,
                 );
             }
         }
@@ -682,7 +725,7 @@ impl ElementCx<'_, '_> {
         // Regular children
         if let Some(children) = &*self.node.paint_children.borrow() {
             for child_id in children {
-                self.render_node(scene, *child_id, parent_style_transform);
+                self.render_node(scene, *child_id, parent_style_transform, clip_rect);
             }
         }
 
@@ -697,6 +740,7 @@ impl ElementCx<'_, '_> {
                     scene,
                     hoisted_child.node_id,
                     parent_style_transform.pre_translate(pos),
+                    clip_rect,
                 );
             }
         }
@@ -847,395 +891,6 @@ impl ElementCx<'_, '_> {
 
             scene.stroke(&stroke, self.transform, stroke_color, None, &shape);
         }
-    }
-
-    /// Draw all borders for a node
-    fn draw_border(&self, scene: &mut impl PaintScene) {
-        // collapse 表格的边框由 draw_table_borders 统一处理(单元格边框已合并,
-        // 外框还需遵循 overflow 裁剪、忽略 border-radius 等浏览器行为),这里不再
-        // 用通用逻辑重复绘制表格自身的 border,否则会画出主流浏览器不显示的外框。
-        if let SpecialElementData::TableRoot(table) = &self.element.special_data {
-            if table.border_collapse == BorderCollapse::Collapse {
-                return;
-            }
-        }
-
-        let style = &*self.style;
-        let border = style.get_border();
-        let current_color = style.clone_color();
-
-        let mut borders: [(Color, Option<BezPath>); 4] = [
-            (Color::TRANSPARENT, None),
-            (Color::TRANSPARENT, None),
-            (Color::TRANSPARENT, None),
-            (Color::TRANSPARENT, None),
-        ];
-        let mut count = 0;
-
-        // 预解析四条边的 (颜色, 样式, 边宽)。
-        let bw = self.frame.border_width;
-        let edge_info = |edge: Edge| -> (Color, BorderStyle, f64) {
-            let (color, edge_style, width) = match edge {
-                Edge::Top => (&border.border_top_color, border.border_top_style, bw.y0),
-                Edge::Right => (&border.border_right_color, border.border_right_style, bw.x1),
-                Edge::Bottom => (&border.border_bottom_color, border.border_bottom_style, bw.y1),
-                Edge::Left => (&border.border_left_color, border.border_left_style, bw.x0),
-            };
-            (
-                color.resolve_to_absolute(&current_color).as_srgb_color(),
-                edge_style,
-                width,
-            )
-        };
-
-        // 当四条边都是「相同」的 dashed/dotted(同样式/同色/同宽)时,沿整圈闭合中线
-        // 一次性描边:虚线能连续绕过 border-radius 圆角,且角点不会因相邻边各自描边而
-        // 重叠出十字。非一致(各边颜色/样式不同)的情况再退回逐边直线描边。
-        let first = edge_info(Edge::Top);
-        let all_uniform_dashy = matches!(first.1, BorderStyle::Dashed | BorderStyle::Dotted)
-            && first.0.components[3] > 0.0
-            && [Edge::Right, Edge::Bottom, Edge::Left].iter().all(|&e| {
-                let (c, s, w) = edge_info(e);
-                c == first.0 && s == first.1 && w == first.2
-            });
-        if all_uniform_dashy {
-            let path = self.frame.border_centerline_path();
-            self.stroke_dashed_path(
-                scene,
-                &path,
-                first.0,
-                first.2,
-                first.1 == BorderStyle::Dotted,
-            );
-            return;
-        }
-
-        for &edge in &[Edge::Top, Edge::Right, Edge::Bottom, Edge::Left] {
-            let (color, edge_style, _) = edge_info(edge);
-
-            if color.components[3] <= 0.0 {
-                continue;
-            }
-
-            match edge_style {
-                // Border isn't painted at all for these styles.
-                BorderStyle::None | BorderStyle::Hidden => {}
-                // Dashed/dotted边框单独走描边路径(沿边框中线按虚线模式描边)。
-                BorderStyle::Dashed | BorderStyle::Dotted => {
-                    self.stroke_dashed_border_edge(
-                        scene,
-                        edge,
-                        color,
-                        edge_style == BorderStyle::Dotted,
-                    );
-                }
-                // 其余样式(Solid/Double/Groove/...)沿用填充梯形的实现。
-                _ => {
-                    borders[count] = (color, Some(self.frame.border_edge_shape(edge)));
-                    count += 1;
-                }
-            }
-        }
-
-        if count == 0 {
-            return;
-        }
-
-        // Group together identical colors by sorting.
-        let active_slice = &mut borders[0..count];
-        active_slice.sort_unstable_by(|a, b| {
-            a.0.components
-                .partial_cmp(&b.0.components)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let mut start_border_index = 0;
-        while start_border_index < count {
-            let color = borders[start_border_index].0;
-            let mut next_border_index = start_border_index + 1;
-            let has_multiple_edges =
-                next_border_index < count && borders[next_border_index].0 == color;
-            if has_multiple_edges {
-                let mut border_path = borders[start_border_index].1.take().unwrap();
-                while next_border_index < count && borders[next_border_index].0 == color {
-                    border_path.extend(&borders[next_border_index].1.take().unwrap());
-                    next_border_index += 1;
-                }
-                scene.fill(Fill::NonZero, self.transform, color, None, &border_path);
-            } else {
-                scene.fill(
-                    Fill::NonZero,
-                    self.transform,
-                    color,
-                    None,
-                    borders[start_border_index].1.as_ref().unwrap(),
-                );
-            }
-            start_border_index = next_border_index;
-        }
-    }
-
-    /// 描边绘制单条 dashed / dotted 边框(直边,不含圆角)。
-    ///
-    /// 做法:沿该边框的中线(border-box 内缩半个边宽)画一条直线,交给
-    /// [`stroke_dashed_path`] 按虚线模式描边。圆角统一由 [`draw_border`] 里
-    /// 「四边一致」的整圈中线路径处理,所以这里只处理直线段即可。
-    fn stroke_dashed_border_edge(
-        &self,
-        scene: &mut impl PaintScene,
-        edge: Edge,
-        color: Color,
-        dotted: bool,
-    ) {
-        let bb = self.frame.border_box;
-        let bw = self.frame.border_width;
-
-        // (起点, 终点, 该边的边框宽度)
-        let (p0, p1, width) = match edge {
-            Edge::Top => {
-                let y = bb.y0 + bw.y0 / 2.0;
-                (Point::new(bb.x0, y), Point::new(bb.x1, y), bw.y0)
-            }
-            Edge::Bottom => {
-                let y = bb.y1 - bw.y1 / 2.0;
-                (Point::new(bb.x0, y), Point::new(bb.x1, y), bw.y1)
-            }
-            Edge::Left => {
-                let x = bb.x0 + bw.x0 / 2.0;
-                (Point::new(x, bb.y0), Point::new(x, bb.y1), bw.x0)
-            }
-            Edge::Right => {
-                let x = bb.x1 - bw.x1 / 2.0;
-                (Point::new(x, bb.y0), Point::new(x, bb.y1), bw.x1)
-            }
-        };
-
-        if width <= 0.0 {
-            return;
-        }
-
-        let mut line = BezPath::new();
-        line.move_to(p0);
-        line.line_to(p1);
-
-        self.stroke_dashed_path(scene, &line, color, width, dotted);
-    }
-
-    /// 以给定边宽和颜色对一条路径做虚线描边。
-    ///
-    /// dash 模式近似浏览器:dotted 为「点 间隔」≈ 边宽并用圆头(round)成圆点;
-    /// dashed 为「划 间隔」≈ 3 倍边宽并用平头(butt)。
-    fn stroke_dashed_path(
-        &self,
-        scene: &mut impl PaintScene,
-        path: &BezPath,
-        color: Color,
-        width: f64,
-        dotted: bool,
-    ) {
-        if width <= 0.0 {
-            return;
-        }
-
-        let (dashes, cap): (Vec<f64>, Cap) = if dotted {
-            // 圆点:dash「实」段长度趋近 0,靠圆头(round)的两个半圆拼成一个直径=边宽的圆点;
-            // 「虚」段取约 2 倍边宽,使点心间距≈2*width(点边缘间隔≈一个 width),贴近浏览器。
-            (vec![width * 0.01, width * 2.0], Cap::Round)
-        } else {
-            (vec![width * 3.0, width * 3.0], Cap::Butt)
-        };
-
-        let stroke = Stroke::new(width).with_caps(cap).with_dashes(0.0, dashes);
-        scene.stroke(&stroke, self.transform, color, None, path);
-    }
-
-    fn draw_table_borders(&self, scene: &mut impl PaintScene) {
-        let SpecialElementData::TableRoot(table) = &self.element.special_data else {
-            return;
-        };
-        // Borders are only handled at the table level when BorderCollapse::Collapse
-        if table.border_collapse != BorderCollapse::Collapse {
-            return;
-        }
-
-        let Some(grid_info) = &mut *table.computed_grid_info.borrow_mut() else {
-            return;
-        };
-        let Some(border_style) = table.border_style.as_deref() else {
-            return;
-        };
-
-        let outer_border_style = self.style.get_border();
-
-        // 网格(单元格)布局位于表格的 content-box 内(被表格自身的 border/padding 内缩),
-        // 而下面的 Rect 坐标是相对网格原点的。需把绘制原点平移到 content-box,
-        // 否则边框线会相对单元格内容整体偏移(约表格 border 宽),与表头背景错位。
-        let content_origin = self.frame.content_box.origin();
-        let transform = self.transform
-            * Affine::translate((content_origin.x, content_origin.y));
-
-        let cols = &grid_info.columns;
-        let rows = &grid_info.rows;
-
-        let inner_width =
-            (cols.sizes.iter().sum::<f32>() + cols.gutters.iter().sum::<f32>()) as f64;
-        let inner_height =
-            (rows.sizes.iter().sum::<f32>() + rows.gutters.iter().sum::<f32>()) as f64;
-
-        let current_color = self.style.clone_color();
-        let resolve = |color: &style::values::computed::Color| {
-            color.resolve_to_absolute(&current_color).as_srgb_color()
-        };
-        // border-style 为 none/hidden 时视为无边框(CSS 下 border-width 计算值为 0,
-        // 但 stylo 的 clone_border 仍给 medium=3px,需按样式归零)。
-        let visible = |s: BorderStyle| !matches!(s, BorderStyle::None | BorderStyle::Hidden);
-
-        // 内部网格线由单元格边框决定(collapse 模式下单元格自身边框被清零,
-        // 改在表级统一绘制)。水平线优先取单元格 border-bottom、退回 border-top;
-        // 垂直线优先取 border-right、退回 border-left。无可见边框的方向不绘制,
-        // 这样只设 border-bottom 的单元格不会画出多余的竖线。
-        let h_inner = if visible(border_style.border_bottom_style) {
-            Some(resolve(&border_style.border_bottom_color))
-        } else if visible(border_style.border_top_style) {
-            Some(resolve(&border_style.border_top_color))
-        } else {
-            None
-        };
-        let v_inner = if visible(border_style.border_right_style) {
-            Some(resolve(&border_style.border_right_color))
-        } else if visible(border_style.border_left_style) {
-            Some(resolve(&border_style.border_left_color))
-        } else {
-            None
-        };
-
-        // Draw horizontal inner borders
-        if let Some(color) = h_inner.filter(|c| c.components[3] > 0.0) {
-            let mut y = 0.0;
-            for (&height, &gutter) in rows.sizes.iter().zip(rows.gutters.iter()) {
-                let shape =
-                    Rect::new(0.0, y, inner_width, y + gutter as f64).scale_from_origin(self.scale);
-                scene.fill(Fill::NonZero, transform, color, None, &shape);
-
-                y += (height + gutter) as f64;
-            }
-        }
-
-        // Draw vertical inner borders
-        if let Some(color) = v_inner.filter(|c| c.components[3] > 0.0) {
-            let mut x = 0.0;
-            for (&width, &gutter) in cols.sizes.iter().zip(cols.gutters.iter()) {
-                let shape = Rect::new(x, 0.0, x + gutter as f64, inner_height)
-                    .scale_from_origin(self.scale);
-                scene.fill(Fill::NonZero, transform, color, None, &shape);
-
-                x += (width + gutter) as f64;
-            }
-        }
-
-        // 外框使用表格自身的 border(各边独立的颜色/宽度/样式),而不是套用
-        // 单元格边框——这样 `table{border:1px solid ...}` 才能正确显示。
-        //
-        // 但 collapse 模式下合并外框是「骑」在表格边线上绘制(外侧一半在 border-box 之外),
-        // 当表格 overflow 非 visible 时,主流浏览器(Chrome/Edge/Safari)会把这外侧部分裁掉,
-        // 外框因而几乎不可见。为与主流浏览器一致,这种情况下不绘制合并外框
-        // (内部网格线属于内容区,不受影响,照常绘制)。
-        let box_styles = self.style.get_box();
-        let clips_overflow = !matches!(box_styles.overflow_x, Overflow::Visible)
-            || !matches!(box_styles.overflow_y, Overflow::Visible);
-
-        let outer_edge = |style: BorderStyle, width: f64, color: &style::values::computed::Color| {
-            if clips_overflow {
-                return None;
-            }
-            if width <= 0.0
-                || matches!(style, BorderStyle::None | BorderStyle::Hidden)
-            {
-                return None;
-            }
-            let c = resolve(color);
-            (c.components[3] > 0.0).then_some((c, width))
-        };
-
-        // Top border
-        if let Some((color, w)) = outer_edge(
-            outer_border_style.border_top_style,
-            outer_border_style.border_top_width.0.to_f64_px(),
-            &outer_border_style.border_top_color,
-        ) {
-            let shape = Rect::new(0.0, 0.0, inner_width, w).scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, transform, color, None, &shape);
-        }
-        // Bottom border
-        if let Some((color, w)) = outer_edge(
-            outer_border_style.border_bottom_style,
-            outer_border_style.border_bottom_width.0.to_f64_px(),
-            &outer_border_style.border_bottom_color,
-        ) {
-            let shape = Rect::new(0.0, inner_height, inner_width, inner_height + w)
-                .scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, transform, color, None, &shape);
-        }
-        // Left border
-        if let Some((color, w)) = outer_edge(
-            outer_border_style.border_left_style,
-            outer_border_style.border_left_width.0.to_f64_px(),
-            &outer_border_style.border_left_color,
-        ) {
-            let shape = Rect::new(0.0, 0.0, w, inner_height).scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, transform, color, None, &shape);
-        }
-        // Right border
-        if let Some((color, w)) = outer_edge(
-            outer_border_style.border_right_style,
-            outer_border_style.border_right_width.0.to_f64_px(),
-            &outer_border_style.border_right_color,
-        ) {
-            let shape = Rect::new(inner_width, 0.0, inner_width + w, inner_height)
-                .scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, transform, color, None, &shape);
-        }
-    }
-
-    /// ❌ dotted - Defines a dotted border
-    /// ❌ dashed - Defines a dashed border
-    /// ✅ solid - Defines a solid border
-    /// ❌ double - Defines a double border
-    /// ❌ groove - Defines a 3D grooved border. The effect depends on the border-color value
-    /// ❌ ridge - Defines a 3D ridged border. The effect depends on the border-color value
-    /// ❌ inset - Defines a 3D inset border. The effect depends on the border-color value
-    /// ❌ outset - Defines a 3D outset border. The effect depends on the border-color value
-    /// ✅ none - Defines no border
-    /// ✅ hidden - Defines a hidden border
-    fn draw_outline(&self, scene: &mut impl PaintScene) {
-        let outline = self.style.get_outline();
-
-        let current_color = self.style.clone_color();
-        let color = outline
-            .outline_color
-            .resolve_to_absolute(&current_color)
-            .as_srgb_color();
-
-        let style = match outline.outline_style {
-            OutlineStyle::Auto => return,
-            OutlineStyle::BorderStyle(style) => style,
-        };
-
-        let path = match style {
-            BorderStyle::None | BorderStyle::Hidden => return,
-            BorderStyle::Solid => self.frame.outline(),
-
-            // TODO: Implement other border styles
-            BorderStyle::Inset
-            | BorderStyle::Groove
-            | BorderStyle::Outset
-            | BorderStyle::Ridge
-            | BorderStyle::Dotted
-            | BorderStyle::Dashed
-            | BorderStyle::Double => self.frame.outline(),
-        };
-
-        scene.fill(Fill::NonZero, self.transform, color, None, &path);
     }
 }
 impl<'dom, 'a> std::ops::Deref for ElementCx<'dom, 'a> {

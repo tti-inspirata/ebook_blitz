@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    body {
+        font-family: sans-serif;
+        background: #f5f5f5;
+        margin: 0;
+        padding: 24px;
+    }
+    h1 {
+        margin-top: 0;
+    }
+    .grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 24px;
+    }
+    .item {
+        background: white;
+        padding: 24px;
+    }
+    .box {
+        width: 100%;
+        height: 80px;
+        box-sizing: border-box;
+        background: #fffbe6;
+        border-width: 8px;
+        border-color: #d6336c;
+        margin-bottom: 12px;
+    }
+    .label {
+        font-weight: bold;
+        color: #333;
+        font-size: 14px;
+    }
+    .code {
+        font-family: monospace;
+        font-size: 12px;
+        color: #666;
+    }
+
+    .bs-none      { border-style: none; }
+    .bs-hidden    { border-style: hidden; }
+    .bs-dotted    { border-style: dotted; }
+    .bs-dashed    { border-style: dashed; }
+    .bs-solid     { border-style: solid; }
+    .bs-double    { border-style: double; }
+    .bs-groove    { border-style: groove; }
+    .bs-ridge     { border-style: ridge; }
+    .bs-inset     { border-style: inset; }
+    .bs-outset    { border-style: outset; }
+
+    /* Mixed border-style per side */
+    .bs-mixed {
+        border-style: dotted solid dashed double;
+    }
+
+    /* Thin variant: border-width of 1px */
+    .box.thin {
+        border-width: 1px;
+    }
+
+    /* Rounded variant: border-radius applied */
+    .box.rounded {
+        border-radius: 24px;
+    }
+
+    /* Variable radius variant: a different elliptical border-radius per
+       corner (uniform border-width from .box) */
+    .box.varradius {
+        border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;
+    }
+
+    /* Multicolor variant: a different border-color per side */
+    .box.multicolor {
+        border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;
+    }
+
+    /* Dark variant: a dark border color */
+    .box.dark {
+        border-color: #1a1a1a;
+    }
+
+    /* Variable width variant: a different border-width per side */
+    .box.varwidth {
+        border-width: 4px 12px 20px 8px;
+    }
+
+    /* Fancy variant: elliptical per-corner radii, a different color and
+       width per side */
+    .box.fancy {
+        border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;
+        border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;
+        border-width: 4px 12px 20px 8px;
+    }
+</style>
+</head>
+<body>
+    <h1>CSS border-style values</h1>
+    <div class="grid">
+        <div class="item">
+            <div class="box bs-none"></div>
+            <div class="label">none</div>
+            <div class="code">border-style: none;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-hidden"></div>
+            <div class="label">hidden</div>
+            <div class="code">border-style: hidden;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-dotted"></div>
+            <div class="label">dotted</div>
+            <div class="code">border-style: dotted;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-dashed"></div>
+            <div class="label">dashed</div>
+            <div class="code">border-style: dashed;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-solid"></div>
+            <div class="label">solid</div>
+            <div class="code">border-style: solid;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-double"></div>
+            <div class="label">double</div>
+            <div class="code">border-style: double;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-groove"></div>
+            <div class="label">groove</div>
+            <div class="code">border-style: groove;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-ridge"></div>
+            <div class="label">ridge</div>
+            <div class="code">border-style: ridge;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-inset"></div>
+            <div class="label">inset</div>
+            <div class="code">border-style: inset;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-outset"></div>
+            <div class="label">outset</div>
+            <div class="code">border-style: outset;</div>
+        </div>
+        <div class="item">
+            <div class="box bs-mixed"></div>
+            <div class="label">mixed (per side)</div>
+            <div class="code">border-style: dotted solid dashed double;</div>
+        </div>
+    </div>
+
+    <h1>border-width: 1px</h1>
+    <div class="grid">
+        <div class="item">
+            <div class="box thin bs-none"></div>
+            <div class="label">none</div>
+            <div class="code">border-style: none; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-hidden"></div>
+            <div class="label">hidden</div>
+            <div class="code">border-style: hidden; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-dotted"></div>
+            <div class="label">dotted</div>
+            <div class="code">border-style: dotted; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-dashed"></div>
+            <div class="label">dashed</div>
+            <div class="code">border-style: dashed; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-solid"></div>
+            <div class="label">solid</div>
+            <div class="code">border-style: solid; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-double"></div>
+            <div class="label">double</div>
+            <div class="code">border-style: double; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-groove"></div>
+            <div class="label">groove</div>
+            <div class="code">border-style: groove; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-ridge"></div>
+            <div class="label">ridge</div>
+            <div class="code">border-style: ridge; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-inset"></div>
+            <div class="label">inset</div>
+            <div class="code">border-style: inset; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-outset"></div>
+            <div class="label">outset</div>
+            <div class="code">border-style: outset; border-width: 1px;</div>
+        </div>
+        <div class="item">
+            <div class="box thin bs-mixed"></div>
+            <div class="label">mixed (per side)</div>
+            <div class="code">border-style: dotted solid dashed double; border-width: 1px;</div>
+        </div>
+    </div>
+
+    <h1>border-radius: 24px</h1>
+    <div class="grid">
+        <div class="item">
+            <div class="box rounded bs-none"></div>
+            <div class="label">none</div>
+            <div class="code">border-style: none; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-hidden"></div>
+            <div class="label">hidden</div>
+            <div class="code">border-style: hidden; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-dotted"></div>
+            <div class="label">dotted</div>
+            <div class="code">border-style: dotted; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-dashed"></div>
+            <div class="label">dashed</div>
+            <div class="code">border-style: dashed; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-solid"></div>
+            <div class="label">solid</div>
+            <div class="code">border-style: solid; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-double"></div>
+            <div class="label">double</div>
+            <div class="code">border-style: double; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-groove"></div>
+            <div class="label">groove</div>
+            <div class="code">border-style: groove; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-ridge"></div>
+            <div class="label">ridge</div>
+            <div class="code">border-style: ridge; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-inset"></div>
+            <div class="label">inset</div>
+            <div class="code">border-style: inset; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-outset"></div>
+            <div class="label">outset</div>
+            <div class="code">border-style: outset; border-radius: 24px;</div>
+        </div>
+        <div class="item">
+            <div class="box rounded bs-mixed"></div>
+            <div class="label">mixed (per side)</div>
+            <div class="code">border-style: dotted solid dashed double; border-radius: 24px;</div>
+        </div>
+    </div>
+
+    <h1>elliptical border-radius per corner (x / y: top-left top-right bottom-right bottom-left)</h1>
+    <div class="grid">
+        <div class="item">
+            <div class="box varradius bs-none"></div>
+            <div class="label">none</div>
+            <div class="code">border-style: none; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-hidden"></div>
+            <div class="label">hidden</div>
+            <div class="code">border-style: hidden; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-dotted"></div>
+            <div class="label">dotted</div>
+            <div class="code">border-style: dotted; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-dashed"></div>
+            <div class="label">dashed</div>
+            <div class="code">border-style: dashed; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-solid"></div>
+            <div class="label">solid</div>
+            <div class="code">border-style: solid; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-double"></div>
+            <div class="label">double</div>
+            <div class="code">border-style: double; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-groove"></div>
+            <div class="label">groove</div>
+            <div class="code">border-style: groove; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-ridge"></div>
+            <div class="label">ridge</div>
+            <div class="code">border-style: ridge; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-inset"></div>
+            <div class="label">inset</div>
+            <div class="code">border-style: inset; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-outset"></div>
+            <div class="label">outset</div>
+            <div class="code">border-style: outset; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+        <div class="item">
+            <div class="box varradius bs-mixed"></div>
+            <div class="label">mixed (per side)</div>
+            <div class="code">border-style: dotted solid dashed double; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px;</div>
+        </div>
+    </div>
+
+    <h1>border-color per side (top right bottom left)</h1>
+    <div class="grid">
+        <div class="item">
+            <div class="box multicolor bs-none"></div>
+            <div class="label">none</div>
+            <div class="code">border-style: none; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-hidden"></div>
+            <div class="label">hidden</div>
+            <div class="code">border-style: hidden; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-dotted"></div>
+            <div class="label">dotted</div>
+            <div class="code">border-style: dotted; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-dashed"></div>
+            <div class="label">dashed</div>
+            <div class="code">border-style: dashed; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-solid"></div>
+            <div class="label">solid</div>
+            <div class="code">border-style: solid; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-double"></div>
+            <div class="label">double</div>
+            <div class="code">border-style: double; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-groove"></div>
+            <div class="label">groove</div>
+            <div class="code">border-style: groove; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-ridge"></div>
+            <div class="label">ridge</div>
+            <div class="code">border-style: ridge; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-inset"></div>
+            <div class="label">inset</div>
+            <div class="code">border-style: inset; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-outset"></div>
+            <div class="label">outset</div>
+            <div class="code">border-style: outset; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+        <div class="item">
+            <div class="box multicolor bs-mixed"></div>
+            <div class="label">mixed (per side)</div>
+            <div class="code">border-style: dotted solid dashed double; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00;</div>
+        </div>
+    </div>
+
+    <h1>border-color: #1a1a1a (inset, outset, groove, ridge)</h1>
+    <div class="grid">
+        <div class="item">
+            <div class="box dark bs-groove"></div>
+            <div class="label">groove</div>
+            <div class="code">border-style: groove; border-color: #1a1a1a;</div>
+        </div>
+        <div class="item">
+            <div class="box dark bs-ridge"></div>
+            <div class="label">ridge</div>
+            <div class="code">border-style: ridge; border-color: #1a1a1a;</div>
+        </div>
+        <div class="item">
+            <div class="box dark bs-inset"></div>
+            <div class="label">inset</div>
+            <div class="code">border-style: inset; border-color: #1a1a1a;</div>
+        </div>
+        <div class="item">
+            <div class="box dark bs-outset"></div>
+            <div class="label">outset</div>
+            <div class="code">border-style: outset; border-color: #1a1a1a;</div>
+        </div>
+    </div>
+
+    <h1>border-width per side (top right bottom left)</h1>
+    <div class="grid">
+        <div class="item">
+            <div class="box varwidth bs-none"></div>
+            <div class="label">none</div>
+            <div class="code">border-style: none; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-hidden"></div>
+            <div class="label">hidden</div>
+            <div class="code">border-style: hidden; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-dotted"></div>
+            <div class="label">dotted</div>
+            <div class="code">border-style: dotted; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-dashed"></div>
+            <div class="label">dashed</div>
+            <div class="code">border-style: dashed; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-solid"></div>
+            <div class="label">solid</div>
+            <div class="code">border-style: solid; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-double"></div>
+            <div class="label">double</div>
+            <div class="code">border-style: double; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-groove"></div>
+            <div class="label">groove</div>
+            <div class="code">border-style: groove; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-ridge"></div>
+            <div class="label">ridge</div>
+            <div class="code">border-style: ridge; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-inset"></div>
+            <div class="label">inset</div>
+            <div class="code">border-style: inset; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-outset"></div>
+            <div class="label">outset</div>
+            <div class="code">border-style: outset; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box varwidth bs-mixed"></div>
+            <div class="label">mixed (per side)</div>
+            <div class="code">border-style: dotted solid dashed double; border-width: 4px 12px 20px 8px;</div>
+        </div>
+    </div>
+
+    <h1>Fancy: elliptical per-corner radii, per-side color &amp; width</h1>
+    <div class="grid">
+        <div class="item">
+            <div class="box fancy bs-none"></div>
+            <div class="label">none</div>
+            <div class="code">border-style: none; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-hidden"></div>
+            <div class="label">hidden</div>
+            <div class="code">border-style: hidden; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-dotted"></div>
+            <div class="label">dotted</div>
+            <div class="code">border-style: dotted; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-dashed"></div>
+            <div class="label">dashed</div>
+            <div class="code">border-style: dashed; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-solid"></div>
+            <div class="label">solid</div>
+            <div class="code">border-style: solid; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-double"></div>
+            <div class="label">double</div>
+            <div class="code">border-style: double; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-groove"></div>
+            <div class="label">groove</div>
+            <div class="code">border-style: groove; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-ridge"></div>
+            <div class="label">ridge</div>
+            <div class="code">border-style: ridge; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-inset"></div>
+            <div class="label">inset</div>
+            <div class="code">border-style: inset; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-outset"></div>
+            <div class="label">outset</div>
+            <div class="code">border-style: outset; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+        <div class="item">
+            <div class="box fancy bs-mixed"></div>
+            <div class="label">mixed (per side)</div>
+            <div class="code">border-style: dotted solid dashed double; border-radius: 10px 40px 30px 60px / 30px 10px 50px 20px; border-color: #d6336c #1c7ed6 #2f9e44 #f59f00; border-width: 4px 12px 20px 8px;</div>
+        </div>
+    </div>
+</body>
+</html>

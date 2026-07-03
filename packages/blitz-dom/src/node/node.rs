@@ -969,12 +969,14 @@ impl Node {
             None => false,
         };
 
+        // `scrollable_overflow` is stored in device (scaled) pixels, whereas the
+        // coordinates here are in CSS pixels, so unscale it before comparing.
         let overflow = self.scrollable_overflow;
 
-        let matches_overflow = x >= overflow.x0 as f32
-            && x <= overflow.x1 as f32
-            && y >= overflow.y0 as f32
-            && y <= overflow.y1 as f32;
+        let matches_overflow = x >= (overflow.x0 / scale) as f32
+            && x <= (overflow.x1 / scale) as f32
+            && y >= (overflow.y0 / scale) as f32
+            && y <= (overflow.y1 / scale) as f32;
 
         if !matches_self && !matches_content && !matches_hoisted_content && !matches_overflow {
             return None;
@@ -1157,6 +1159,7 @@ impl Node {
             buttons: Default::default(),
             details: Default::default(),
             element: Default::default(),
+            active_pointers: Default::default(),
         }
     }
 }

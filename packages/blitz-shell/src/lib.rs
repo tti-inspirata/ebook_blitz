@@ -25,7 +25,7 @@ pub use crate::window::{View, WindowConfig};
 pub use crate::net::DataUriNetProvider;
 
 #[cfg(all(
-    feature = "file_dialog",
+    feature = "file-dialog",
     any(
         target_os = "windows",
         target_os = "macos",
@@ -98,8 +98,17 @@ impl ShellProvider for BlitzShellProvider {
     fn request_redraw(&self) {
         self.window.request_redraw();
     }
-    fn set_cursor(&self, icon: CursorIcon) {
-        self.window.set_cursor(Cursor::Icon(icon));
+    fn set_cursor(&self, icon: Option<CursorIcon>) {
+        match icon {
+            Some(icon) => {
+                self.window.set_cursor_visible(true);
+                self.window.set_cursor(Cursor::Icon(icon));
+            }
+            None => {
+                self.window.set_cursor(Cursor::Icon(CursorIcon::Default));
+                self.window.set_cursor_visible(false)
+            }
+        }
     }
     fn set_window_title(&self, title: String) {
         self.window.set_title(&title);
@@ -180,7 +189,7 @@ impl ShellProvider for BlitzShellProvider {
     }
 
     #[cfg(all(
-        feature = "file_dialog",
+        feature = "file-dialog",
         any(
             target_os = "windows",
             target_os = "macos",

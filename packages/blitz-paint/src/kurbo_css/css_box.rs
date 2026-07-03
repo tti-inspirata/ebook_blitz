@@ -1,4 +1,4 @@
-use kurbo::{Arc, BezPath, Ellipse, Insets, PathEl, Point, Rect, Shape as _, Vec2};
+use kurbo::{Arc, BezPath, Insets, PathEl, Point, Rect, Shape as _, Vec2};
 use std::{f64::consts::FRAC_PI_2, f64::consts::PI};
 
 use super::non_uniform_radii::NonUniformRoundedRectRadii;
@@ -139,6 +139,62 @@ impl CssBox {
         path
     }
 
+    /// Whether any corner of this box has a non-zero border radius.
+    pub fn has_border_radius(&self) -> bool {
+        let r = &self.border_radii;
+        [r.top_left, r.top_right, r.bottom_right, r.bottom_left]
+            .iter()
+            .any(|radius| radius.x > 0.0 || radius.y > 0.0)
+    }
+
+    /// Construct a new [`CssBox`] representing a "slice" of this box's border,
+    /// running from `start_frac` to `end_frac` of the border width (measured as
+    /// a fraction from the outer border-box edge inwards).
+    ///
+    /// The returned box's border region is exactly the requested slice, so
+    /// [`CssBox::border_edge_shape`] can then be used to render it. This is used
+    /// to draw the two lines of a `double` border.
+    pub fn border_slice(&self, start_frac: f64, end_frac: f64) -> CssBox {
+        use Corner::*;
+
+        let scale_insets = |frac: f64| Insets {
+            x0: self.border_width.x0 * frac,
+            y0: self.border_width.y0 * frac,
+            x1: self.border_width.x1 * frac,
+            y1: self.border_width.y1 * frac,
+        };
+
+        let start_insets = scale_insets(start_frac);
+        let slice_border = scale_insets(end_frac - start_frac);
+
+        // Move the outer edge of the box inwards to the start of the slice.
+        let slice_border_box = self.border_box - start_insets;
+
+        // Border radii shrink as we move inwards through the border, matching the
+        // model used when computing inner (padding/content) box radii.
+        let reduce = |radius: Vec2, corner: Corner| {
+            let inset = get_corner_insets(start_insets, corner);
+            Vec2 {
+                x: (radius.x - inset.x).max(0.0),
+                y: (radius.y - inset.y).max(0.0),
+            }
+        };
+        let slice_radii = NonUniformRoundedRectRadii {
+            top_left: reduce(self.border_radii.top_left, TopLeft),
+            top_right: reduce(self.border_radii.top_right, TopRight),
+            bottom_right: reduce(self.border_radii.bottom_right, BottomRight),
+            bottom_left: reduce(self.border_radii.bottom_left, BottomLeft),
+        };
+
+        CssBox::new(
+            slice_border_box,
+            slice_border,
+            Insets::ZERO,
+            0.0,
+            slice_radii,
+        )
+    }
+
     /// Construct a bezpath drawing the outline
     pub fn outline(&self) -> BezPath {
         let mut path = BezPath::new();
@@ -157,42 +213,6 @@ impl CssBox {
     pub fn border_box_path(&self) -> BezPath {
         let mut path = BezPath::new();
         self.shape(&mut path, CssBoxKind::BorderBox, Direction::Clockwise);
-        path
-    }
-
-    /// 构造一条沿边框「中线」的闭合路径(border-box 向内缩半个边框宽度),
-    /// 跟随 border-radius 圆角。用于 dashed / dotted 边框的描边绘制,
-    /// 使虚线能正确绕过圆角。各边宽度不同的情形按各自半宽近似内缩。
-    pub fn border_centerline_path(&self) -> BezPath {
-        use Corner::*;
-
-        let bw = self.border_width;
-        let half = Insets {
-            x0: bw.x0 / 2.0,
-            y0: bw.y0 / 2.0,
-            x1: bw.x1 / 2.0,
-            y1: bw.y1 / 2.0,
-        };
-        let center_rect = self.border_box - half;
-
-        // 中线处的角半径 = 边框角半径 - 半个相邻边宽(裁剪到非负)。
-        let reduce = |r: Vec2, corner: Corner| -> Vec2 {
-            let ci = get_corner_insets(half, corner);
-            Vec2::new((r.x - ci.x).max(0.0), (r.y - ci.y).max(0.0))
-        };
-        let center_radii = NonUniformRoundedRectRadii {
-            top_left: reduce(self.border_radii.top_left, TopLeft),
-            top_right: reduce(self.border_radii.top_right, TopRight),
-            bottom_right: reduce(self.border_radii.bottom_right, BottomRight),
-            bottom_left: reduce(self.border_radii.bottom_left, BottomLeft),
-        };
-
-        // 复用 border_box_path:把中线矩形当作一个零边框的盒子,直接取其外框路径。
-        // border_box_path 生成的是「开口」路径(缺最后一条回到起点的边),
-        // 填充时靠 NonZero 自动闭合,但描边必须显式闭合,否则会丢一条边(如左边)。
-        let mut path =
-            CssBox::new(center_rect, Insets::ZERO, Insets::ZERO, 0.0, center_radii).border_box_path();
-        path.close_path();
         path
     }
 
@@ -314,7 +334,7 @@ impl CssBox {
 
     /// Get the complete arc for a corner, skipping the need for splitting the arc into pieces
     fn corner_arc(&self, corner: Corner, css_box: CssBoxKind, direction: Direction) -> Arc {
-        let ellipse = self.ellipse(corner, css_box);
+        let (center, radii) = self.ellipse(corner, css_box);
 
         // Sweep clockwise for outer arcs, counter clockwise for inner arcs
         let sweep_direction = match direction {
@@ -335,8 +355,8 @@ impl CssBox {
         };
 
         Arc::new(
-            ellipse.center(),
-            ellipse.radii(),
+            center,
+            radii,
             // Note that we apply a fixed offset to get us in the unit circle coordinate system
             // vello chooses the x axis as the start of the arc, so we need to offset by 3pi/2
             offset + PI + FRAC_PI_2,
@@ -362,11 +382,11 @@ impl CssBox {
         use CssBoxKind::*;
         use Edge::*;
 
-        let ellipse = self.ellipse(corner, css_box);
+        let (center, radii) = self.ellipse(corner, css_box);
 
         // We solve a tiny system of equations to find the start angle
         // This is fixed to a single coordinate system, so we need to adjust the start angle
-        let theta = self.start_angle(corner, ellipse.radii());
+        let theta = self.start_angle(corner, radii);
 
         // Sweep clockwise for outer arcs, counter clockwise for inner arcs
         let sweep_direction = match direction {
@@ -420,8 +440,8 @@ impl CssBox {
         };
 
         Arc::new(
-            ellipse.center(),
-            ellipse.radii(),
+            center,
+            radii,
             // Note that we apply a fixed offset to get us in the unit circle coordinate system
             // vello chooses the x axis as the start of the arc, so we need to offset by 3pi/2
             start + offset + PI + FRAC_PI_2,
@@ -460,7 +480,18 @@ impl CssBox {
         }
     }
 
-    fn ellipse(&self, corner: Corner, side: CssBoxKind) -> Ellipse {
+    /// The `(center, radii)` of the ellipse that a given corner traces along the
+    /// given box edge.
+    ///
+    /// The radii are returned as an axis-aligned `(x, y)` pair, matching the CSS
+    /// `border-radius` horizontal/vertical radii. We deliberately do *not* return
+    /// a [`kurbo::Ellipse`]: `Ellipse::radii()` canonicalises the ellipse via an
+    /// SVD, which swaps the axes and introduces a `π/2` rotation whenever the
+    /// vertical radius exceeds the horizontal one (`ry > rx`). Callers here build
+    /// [`kurbo::Arc`]s with a fixed `x_rotation` of `0`, so that swap would draw
+    /// the corner with its axes transposed. Returning the raw radii avoids the
+    /// round-trip entirely.
+    fn ellipse(&self, corner: Corner, side: CssBoxKind) -> (Point, Vec2) {
         use {Corner::*, CssBoxKind::*};
         let CssBox {
             border_box,
@@ -502,7 +533,7 @@ impl CssBox {
             }
         };
 
-        Ellipse::new(border_box.origin() + center, radii, 0.0)
+        (border_box.origin() + center, radii)
     }
 
     fn start_angle(&self, corner: Corner, radii: Vec2) -> f64 {
@@ -567,18 +598,139 @@ fn start_angle(bt_width: f64, br_width: f64, radii: Vec2) -> f64 {
 
     b/(w*a) = (cos(t) - 1)/(sin(t) - 1)
 
-    The solution to the system of equations is:
-    https://www.wolframalpha.com/input?i=%28cos%28x%29-1%29%2F%28sin%28x%29-1%29+%3D+a+solve+for+x
+    Substituting s = tan(t/2) turns this into the quadratic
+
+        (k - 2) s² - 2k s + k = 0     where k = b/(w*a) = x
+
+    whose relevant root can be written (after rationalising to remove the
+    catastrophic cancellation / removable singularity the naive quadratic
+    formula has at k == 2) as:
+
+        s = √k / (√k + √2)
+
+    This form is well behaved for all k >= 0 (in particular around k == 2,
+    which occurs for perfectly ordinary elliptical corners, e.g. a 80px/30px
+    radius with 40px/10px border widths), always yielding t in [0, π/2).
     */
 
     use std::f64::consts::SQRT_2;
-    let numerator: f64 = x - x.sqrt() * SQRT_2;
-    let denonimantor: f64 = x - 2.0;
-    (numerator / denonimantor).atan() * 2.0
+    let sqrt_x = x.sqrt();
+    let s = sqrt_x / (sqrt_x + SQRT_2);
+    s.atan() * 2.0
 }
 
-#[test]
-fn should_solve_properly() {
-    // 0.643501
-    dbg!(start_angle(4.0, 1.0, Vec2 { x: 1.0, y: 2.0 }));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `start_angle` must return the angle `t` at which the border colour split
+    /// line crosses the corner ellipse, i.e. the solution of
+    /// `(cos t - 1) / (sin t - 1) == k` where `k = radii.y / (w * radii.x)`.
+    fn assert_solves(bt: f64, br: f64, radii: Vec2) {
+        let t = start_angle(bt, br, radii);
+        assert!(t.is_finite(), "start_angle returned {t} for {radii:?}");
+        assert!(
+            (0.0..=std::f64::consts::FRAC_PI_2).contains(&t),
+            "t={t} out of range"
+        );
+        let w = bt / br;
+        let k = radii.y / (w * radii.x);
+        let lhs = (t.cos() - 1.0) / (t.sin() - 1.0);
+        assert!(
+            (lhs - k).abs() < 1e-9,
+            "t={t} does not solve k={k} (got {lhs})"
+        );
+    }
+
+    /// Regression test for elliptical corners where the vertical radius exceeds
+    /// the horizontal one (`ry > rx`). `kurbo::Ellipse::radii()` canonicalises
+    /// such an ellipse by swapping its axes and adding a `π/2` rotation; when
+    /// that rotation was dropped the corner arcs were drawn transposed, skewing
+    /// the whole box. The straight portions of each edge must stay axis aligned:
+    /// the top/bottom edges horizontal and the left/right edges vertical.
+    #[test]
+    fn edges_stay_axis_aligned_for_tall_corners() {
+        let b = CssBox::new(
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+            Insets::uniform(10.0),
+            Insets::ZERO,
+            0.0,
+            NonUniformRoundedRectRadii {
+                top_left: Vec2::new(60.0, 20.0),
+                top_right: Vec2::new(20.0, 50.0), // ry > rx
+                bottom_right: Vec2::new(50.0, 10.0),
+                bottom_left: Vec2::new(30.0, 40.0), // ry > rx
+            },
+        );
+
+        // The outer border box corner y (top) / x (right) etc. that the straight
+        // part of each edge should run along.
+        let checks = [
+            (Edge::Top, 0.0),      // outer top edge at y == 0
+            (Edge::Bottom, 200.0), // outer bottom edge at y == 200
+            (Edge::Left, 0.0),     // outer left edge at x == 0
+            (Edge::Right, 400.0),  // outer right edge at x == 400
+        ];
+        // Collect every point (endpoints and Bézier control points) of a path.
+        // A cubic Bézier lies within the convex hull of its control points, so
+        // checking these is enough to prove the whole path stays in the box.
+        let points = |path: &BezPath| -> Vec<Point> {
+            path.elements()
+                .iter()
+                .flat_map(|el| match *el {
+                    PathEl::MoveTo(p) | PathEl::LineTo(p) => vec![p],
+                    PathEl::QuadTo(a, b) => vec![a, b],
+                    PathEl::CurveTo(a, b, c) => vec![a, b, c],
+                    PathEl::ClosePath => vec![],
+                })
+                .collect()
+        };
+
+        for (edge, expected) in checks {
+            let path = b.border_edge_shape(edge);
+            let pts = points(&path);
+            // The transposed-axis bug pushed points well outside the border box.
+            for p in &pts {
+                assert!(
+                    (-0.01..=400.01).contains(&p.x) && (-0.01..=200.01).contains(&p.y),
+                    "{edge:?}: point {p:?} escaped the border box"
+                );
+            }
+            // And the outer straight run must actually reach the box edge.
+            let reaches = pts.iter().any(|p| match edge {
+                Edge::Top | Edge::Bottom => (p.y - expected).abs() < 0.01,
+                Edge::Left | Edge::Right => (p.x - expected).abs() < 0.01,
+            });
+            assert!(
+                reaches,
+                "{edge:?}: no point reached the outer edge {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_solve_properly() {
+        // 0.643501
+        assert!((start_angle(4.0, 1.0, Vec2 { x: 1.0, y: 2.0 }) - 0.643501).abs() < 1e-5);
+    }
+
+    /// Regression test: when `k == radii.y / (w * radii.x)` is exactly 2 the
+    /// old closed form evaluated `0 / 0` and produced `NaN`, corrupting the
+    /// corner arc. This happens for ordinary elliptical corners such as an
+    /// 80px/30px radius with 40px/10px border widths (inner/padding ellipse
+    /// radii 40/20, widths 30/0 ... => k == 2).
+    #[test]
+    fn handles_k_equal_two() {
+        // k = radii.y / (w * radii.x) = 40 / ((10/40) * 80) = 2.0
+        assert_solves(10.0, 40.0, Vec2 { x: 80.0, y: 40.0 });
+    }
+
+    #[test]
+    fn solves_a_range_of_elliptical_corners() {
+        for &(bt, br) in &[(1.0, 1.0), (1.0, 4.0), (4.0, 1.0), (3.0, 7.0)] {
+            for &(rx, ry) in &[(80.0, 30.0), (30.0, 80.0), (60.0, 60.0), (120.0, 20.0)] {
+                assert_solves(bt, br, Vec2 { x: rx, y: ry });
+            }
+        }
+    }
 }

@@ -81,6 +81,23 @@ impl crate::document::BaseDocument {
         let mut sets = self.animations.sets.write();
         for (key, set) in sets.iter_mut() {
             let node_id = key.node.id();
+
+            // Drop animations belonging to nodes that are no longer in the
+            // document. A removed element is never restyled, so it would never
+            // get a chance to cancel its own animations; an infinite animation
+            // would then keep `has_active_animations` set forever and force a
+            // redraw every frame. Emptying the set here lets the `retain` below
+            // discard it so the flag can clear on this same pass.
+            let in_document = self
+                .nodes
+                .get(node_id)
+                .is_some_and(|node| node.flags.is_in_document());
+            if !in_document {
+                set.animations.clear();
+                set.transitions.clear();
+                continue;
+            }
+
             self.nodes[node_id].set_restyle_hint(RestyleHint::RESTYLE_SELF);
 
             for animation in set.animations.iter_mut() {
@@ -453,10 +470,15 @@ impl selectors::Element for BlitzNode<'_> {
         pe: &PseudoElement,
         _context: &mut MatchingContext<Self::Impl>,
     ) -> bool {
-        match self.data {
-            NodeData::AnonymousBlock(_) => *pe == PseudoElement::ServoAnonymousBox,
-            _ => false,
-        }
+        let pseudo = match self.stylo_element_data.get() {
+            Some(el) => el.styles.primary().pseudo().or(match &self.data {
+                NodeData::AnonymousBlock(_) => Some(PseudoElement::ServoAnonymousBox),
+                _ => None,
+            }),
+            None => None,
+        };
+
+        pseudo.is_some_and(|psuedo| psuedo == *pe)
     }
 
     fn apply_selector_flags(&self, flags: ElementSelectorFlags) {

@@ -50,6 +50,7 @@ use style::queries::values::PrefersColorScheme;
 use style::selector_parser::ServoElementSnapshot;
 use style::servo_arc::Arc as ServoArc;
 use style::values::GenericAtomIdent;
+use style::values::computed::ui::CursorKind;
 use style::values::computed::{Overflow, UserSelect};
 use style::{
     device::Device,
@@ -194,6 +195,11 @@ pub struct BaseDocument {
     pub(crate) media_type: MediaType,
     /// Strategy for Stylo's style traversal during `resolve`.
     pub(crate) style_threading: StyleThreading,
+    /// Whether incremental layout is enabled for this document. Defaults to
+    /// whether the `incremental` feature is compiled in. Incremental layout can
+    /// only function when the feature is enabled, so toggling this on has no
+    /// effect in builds compiled without it.
+    pub(crate) incremental_layout: bool,
 
     // Events
     pub(crate) tx: Sender<DocumentEvent>,
@@ -352,7 +358,7 @@ impl BaseDocument {
                     collection: Collection::new(CollectionOptions {
                         shared: false,
                         system_fonts: cfg!(all(
-                            feature = "system_fonts",
+                            feature = "system-fonts",
                             not(target_arch = "wasm32")
                         )),
                     }),
@@ -414,6 +420,7 @@ impl BaseDocument {
             viewport,
             media_type,
             style_threading: config.style_threading,
+            incremental_layout: cfg!(feature = "incremental"),
             devtool_settings: DevtoolSettings::default(),
             viewport_scroll: crate::Point::ZERO,
             url: base_url,
@@ -638,6 +645,32 @@ impl BaseDocument {
                 }
             }
         }
+    }
+
+    /// Toggle the `open` attribute of a `<details>` element, expanding or
+    /// collapsing it. This is the default action triggered when the element's
+    /// first `<summary>` child is activated.
+    pub fn toggle_details_open(&mut self, details_id: usize) {
+        use crate::qual_name;
+
+        let node = &self.nodes[details_id];
+        if !node.data.is_element_with_tag_name(&local_name!("details")) {
+            return;
+        }
+        let is_open = node.data.has_attr(local_name!("open"));
+
+        // Note: HTML attributes are in the empty (null) namespace, so the
+        // QualName must not use the html namespace here, else it won't match
+        // an `open` attribute created by the HTML parser.
+        let mut mutator = self.mutate();
+        if is_open {
+            mutator.clear_attribute(details_id, qual_name!("open"));
+        } else {
+            mutator.set_attribute(details_id, qual_name!("open"), "");
+        }
+        drop(mutator);
+
+        self.shell_provider.request_redraw();
     }
 
     pub fn set_style_property(&mut self, node_id: usize, name: &str, value: &str) {
@@ -1327,8 +1360,7 @@ impl BaseDocument {
         self.hover_node_is_text = new_is_text;
 
         // Update the cursor
-        let cursor = self.get_cursor().unwrap_or_default();
-        self.shell_provider.set_cursor(cursor);
+        self.shell_provider.set_cursor(self.get_cursor());
 
         // Request redraw
         self.shell_provider.request_redraw();
@@ -1350,8 +1382,7 @@ impl BaseDocument {
         self.hover_node_is_text = false;
 
         // Update the cursor
-        let cursor = self.get_cursor().unwrap_or_default();
-        self.shell_provider.set_cursor(cursor);
+        self.shell_provider.set_cursor(self.get_cursor());
 
         // Request redraw
         self.shell_provider.request_redraw();
@@ -1420,12 +1451,37 @@ impl BaseDocument {
         self.viewport.clone()
     }
 
+    /// Returns whether incremental layout is currently enabled for this document.
+    pub fn incremental_layout(&self) -> bool {
+        self.incremental_layout
+    }
+
+    /// Enables or disables incremental layout for this document.
+    ///
+    /// Note that incremental layout only works when the `incremental` feature is
+    /// compiled in; enabling it at runtime has no effect otherwise.
+    pub fn set_incremental_layout(&mut self, enabled: bool) {
+        self.incremental_layout = enabled;
+    }
+
     pub fn devtools(&self) -> &DevtoolSettings {
         &self.devtool_settings
     }
 
     pub fn devtools_mut(&mut self) -> &mut DevtoolSettings {
         &mut self.devtool_settings
+    }
+
+    pub fn subdoc(&self, node_id: usize) -> Option<&dyn Document> {
+        self.get_node(node_id)
+            .and_then(|node| node.element_data())
+            .and_then(|el| el.sub_doc_data())
+    }
+
+    pub fn subdoc_mut(&mut self, node_id: usize) -> Option<&mut dyn Document> {
+        self.get_node_mut(node_id)
+            .and_then(|node| node.element_data_mut())
+            .and_then(|el| el.sub_doc_data_mut())
     }
 
     pub fn is_animating(&self) -> bool {
@@ -1443,6 +1499,28 @@ impl BaseDocument {
 
     /// Update the device and reset the stylist to process the new size
     pub fn set_stylist_device(&mut self, device: Device) {
+        // Seed the new device with the root element's current style and font-relative
+        // unit state (used to resolve rem/rlh/rex/rch/rcap/ric units). Stylo only
+        // updates this state when the root element's style *changes* during a restyle,
+        // so a freshly-built device would otherwise resolve these units against the
+        // default font-size (16px) until the root's font-size next changes.
+        let root_styles = self
+            .try_root_element()
+            .and_then(|root| root.primary_styles());
+        if let Some(root_style) = root_styles.as_deref() {
+            device.set_root_style(root_style);
+
+            let font = root_style.get_font();
+            let font_size = font.clone_font_size().computed_size();
+            device.set_root_font_size(root_style.effective_zoom.unzoom(font_size.px()));
+
+            let line_height = device
+                .calc_line_height(font, root_style.writing_mode, None)
+                .0;
+            device.set_root_line_height(root_style.effective_zoom.unzoom(line_height.px()));
+        }
+        drop(root_styles);
+
         let origins = {
             let guard = &self.guard;
             let guards = StylesheetGuards {
@@ -1467,11 +1545,11 @@ impl BaseDocument {
 
         let style = node.primary_styles()?;
         let user_select = style.clone_user_select();
-        let keyword = stylo_to_cursor_icon(style.clone_cursor().keyword);
+        let keyword = style.clone_cursor().keyword;
 
         // Return cursor from style if it is non-auto
-        if let Some(cursor) = keyword {
-            return Some(cursor);
+        if keyword != CursorKind::Auto {
+            return stylo_to_cursor_icon(keyword);
         }
 
         // Return text cursor for text inputs
@@ -1495,8 +1573,8 @@ impl BaseDocument {
         // Return text cursor for text nodes
         if self.hover_node_is_text {
             return Some(match user_select {
-                UserSelect::Text => CursorIcon::Text,
-                _ => CursorIcon::Default,
+                UserSelect::Text | UserSelect::All | UserSelect::Auto => CursorIcon::Text,
+                UserSelect::None => CursorIcon::Default,
             });
         }
 
@@ -1527,6 +1605,47 @@ impl BaseDocument {
         let Some(node) = self.nodes.get_mut(node_id) else {
             return false;
         };
+
+        // Text inputs scroll their own internal text content rather than using the generic
+        // overflow mechanism: single-line inputs scroll horizontally, multi-line inputs scroll
+        // vertically. Any delta the input cannot consume is bubbled up to an ancestor scroller.
+        if node
+            .element_data()
+            .is_some_and(|el| el.text_input_data().is_some())
+        {
+            let parent = node.parent;
+            let content_box_width = node.final_layout.content_box_width();
+            let content_box_height = node.final_layout.content_box_height();
+            let input = node
+                .element_data_mut()
+                .and_then(|el| el.text_input_data_mut())
+                .unwrap();
+
+            let (bubble_x, bubble_y) = if input.is_multiline {
+                (
+                    x,
+                    input.scroll_by(y as f32, content_box_width, content_box_height) as f64,
+                )
+            } else {
+                (
+                    input.scroll_by(x as f32, content_box_width, content_box_height) as f64,
+                    y,
+                )
+            };
+
+            let has_changed = bubble_x != x || bubble_y != y;
+
+            if bubble_x != 0.0 || bubble_y != 0.0 {
+                let bubbled = if let Some(parent) = parent {
+                    self.scroll_node_by_has_changed(parent, bubble_x, bubble_y, dispatch_event)
+                } else {
+                    self.scroll_viewport_by_has_changed(bubble_x, bubble_y)
+                };
+                return bubbled | has_changed;
+            }
+
+            return has_changed;
+        }
 
         let is_html_or_body = node.data.downcast_element().is_some_and(|e| {
             let tag = &e.name.local;
@@ -1705,6 +1824,24 @@ impl BaseDocument {
             let layout_ctx = &mut self.layout_ctx;
             let driver = text_input.editor.driver(&mut font_ctx, layout_ctx);
             cb(driver)
+        }
+    }
+
+    /// Recompute the scroll offset of the text input at `node_id` (if any) so that its caret
+    /// remains visible within the input's content box.
+    pub(crate) fn clamp_text_input_scroll(&mut self, node_id: usize) {
+        let Some(node) = self.nodes.get_mut(node_id) else {
+            return;
+        };
+
+        let content_box_width = node.final_layout.content_box_width();
+        let content_box_height = node.final_layout.content_box_height();
+
+        if let Some(text_input) = node
+            .element_data_mut()
+            .and_then(|el| el.text_input_data_mut())
+        {
+            text_input.clamp_scroll_offset(content_box_width, content_box_height);
         }
     }
 

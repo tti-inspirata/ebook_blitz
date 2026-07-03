@@ -45,6 +45,10 @@ fn map_dom_event_to_ui_event(
             adjust_coords_for_subdocument(&mut event.coords, node_offset, viewport_scroll);
             Some(UiEvent::PointerUp(event))
         }
+        DomEventData::PointerCancel(mut event) => {
+            adjust_coords_for_subdocument(&mut event.coords, node_offset, viewport_scroll);
+            Some(UiEvent::PointerCancel(event))
+        }
 
         // Enter/leave events will be recreated by sub-document's event driver
         // based move events
@@ -62,6 +66,13 @@ fn map_dom_event_to_ui_event(
         DomEventData::MouseLeave(_) => None,
         DomEventData::MouseOver(_) => None,
         DomEventData::MouseOut(_) => None,
+
+        // Touch events will be recreated by sub-document's event driver
+        // based pointer events
+        DomEventData::TouchStart(_) => None,
+        DomEventData::TouchMove(_) => None,
+        DomEventData::TouchEnd(_) => None,
+        DomEventData::TouchCancel(_) => None,
 
         DomEventData::KeyDown(data) => Some(UiEvent::KeyDown(data)),
         DomEventData::KeyUp(data) => Some(UiEvent::KeyUp(data)),
@@ -90,6 +101,19 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
     let target_node_id = event.target;
     let node = &mut doc.nodes[target_node_id];
     let pos = node.absolute_position(0.0, 0.0);
+
+    // Whether this event can move the caret/selection (or change the text) of a text input,
+    // in which case we need to update the input's scroll offset afterwards.
+    let may_move_text_input_caret = match &event.data {
+        DomEventData::KeyDown(_)
+        | DomEventData::AppleStandardKeybinding(_)
+        | DomEventData::Ime(_)
+        | DomEventData::Click(_) => true,
+        DomEventData::PointerDown(event) | DomEventData::PointerMove(event) => {
+            !event.buttons.is_empty()
+        }
+        _ => false,
+    };
 
     // Handle event forwarding for sub-document
     if let Some(sub_doc) = node.subdoc_mut() {
@@ -177,6 +201,9 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
         DomEventData::MouseUp(_) => {
             // Do nothing (handled in PointerUp)
         }
+        DomEventData::PointerCancel(_) => {
+            // Do nothing (active state is reset in the event driver)
+        }
         DomEventData::Click(event) => {
             handle_click(doc, target_node_id, event, &mut dispatch_event);
         }
@@ -238,6 +265,18 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
         DomEventData::MouseOut(_) => {
             // Do nothing (no default action)
         }
+        DomEventData::TouchStart(_) => {
+            // Do nothing (default action handled via PointerDown)
+        }
+        DomEventData::TouchMove(_) => {
+            // Do nothing (default action handled via PointerMove)
+        }
+        DomEventData::TouchEnd(_) => {
+            // Do nothing (default action handled via PointerUp)
+        }
+        DomEventData::TouchCancel(_) => {
+            // Do nothing (default action handled via PointerCancel)
+        }
         DomEventData::Scroll(_) => {
             // Handled elsewhere
         }
@@ -255,6 +294,15 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
         }
         DomEventData::FocusOut(_) => {
             // Do nothing (no default action)
+        }
+    }
+
+    // Keep the focused text input scrolled so that its caret stays visible. Keyboard/IME events
+    // target the focused input, and pointer events that hit a text input focus it, so the
+    // focused node is the input whose caret may have moved.
+    if may_move_text_input_caret {
+        if let Some(focus_id) = doc.focus_node_id {
+            doc.clamp_text_input_scroll(focus_id);
         }
     }
 }

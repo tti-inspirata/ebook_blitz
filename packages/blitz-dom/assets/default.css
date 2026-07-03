@@ -102,6 +102,14 @@ option {
     display: none;
 }
 
+picture {
+    display: contents;
+}
+
+source {
+    display: none;
+}
+
 /* To ensure http://www.w3.org/TR/REC-html40/struct/dirlang.html#style-bidi:
  *
  * "When a block element that does not have a dir attribute is transformed to
@@ -834,6 +842,12 @@ details>summary:first-of-type {
 
 details[open]>summary:first-of-type {
     list-style-type: disclosure-open;
+}
+
+/* When a <details> is closed, only its first <summary> is shown. Everything
+ * else (including any additional summaries) is hidden. */
+details:not([open])>:not(summary:first-of-type) {
+    display: none !important;
 }
 
 /* media elements */

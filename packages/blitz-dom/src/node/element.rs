@@ -1,7 +1,6 @@
 use cssparser::ParserInput;
 use linebender_resource_handle::Blob;
 use markup5ever::{LocalName, QualName, local_name};
-use parley::{ContentWidths, FontContext, LayoutContext};
 use selectors::matching::QuirksMode;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -21,6 +20,7 @@ use url::Url;
 use super::{Attribute, Attributes};
 use crate::Document;
 use crate::layout::table::TableContext;
+use crate::node::{TextBrush, TextInputData, TextLayout};
 
 #[cfg(feature = "custom-widget")]
 use super::custom_widget::CustomWidgetData;
@@ -81,7 +81,7 @@ pub enum SpecialElementType {
     TableRoot,
     TextInput,
     CheckboxInput,
-    #[cfg(feature = "file_input")]
+    #[cfg(feature = "file-input")]
     FileInput,
     #[default]
     None,
@@ -108,7 +108,7 @@ pub enum SpecialElementData {
     /// Checkbox checked state
     CheckboxInput(bool),
     /// Selected files
-    #[cfg(feature = "file_input")]
+    #[cfg(feature = "file-input")]
     FileInput(FileData),
     /// No data (for nodes that don't need any node-specific data)
     #[default]
@@ -127,7 +127,7 @@ impl Clone for SpecialElementData {
             Self::TableRoot(data) => Self::TableRoot(data.clone()),
             Self::TextInput(data) => Self::TextInput(data.clone()),
             Self::CheckboxInput(data) => Self::CheckboxInput(*data),
-            #[cfg(feature = "file_input")]
+            #[cfg(feature = "file-input")]
             Self::FileInput(data) => Self::FileInput(data.clone()),
             Self::None => Self::None,
         }
@@ -289,7 +289,7 @@ impl ElementData {
         }
     }
 
-    #[cfg(feature = "file_input")]
+    #[cfg(feature = "file-input")]
     pub fn file_data(&self) -> Option<&FileData> {
         match &self.special_data {
             SpecialElementData::FileInput(data) => Some(data),
@@ -297,7 +297,7 @@ impl ElementData {
         }
     }
 
-    #[cfg(feature = "file_input")]
+    #[cfg(feature = "file-input")]
     pub fn file_data_mut(&mut self) -> Option<&mut FileData> {
         match &mut self.special_data {
             SpecialElementData::FileInput(data) => Some(data),
@@ -324,13 +324,14 @@ impl ElementData {
                         if [local_name!("a"), local_name!("area")].contains(&self.name.local) {
                             self.attr(local_name!("href")).is_some()
                         } else {
-                            const DEFAULT_FOCUSSABLE_ELEMENTS: [LocalName; 6] = [
+                            const DEFAULT_FOCUSSABLE_ELEMENTS: [LocalName; 7] = [
                                 local_name!("button"),
                                 local_name!("input"),
                                 local_name!("select"),
                                 local_name!("textarea"),
                                 local_name!("frame"),
                                 local_name!("iframe"),
+                                local_name!("summary"),
                             ];
                             DEFAULT_FOCUSSABLE_ELEMENTS.contains(&self.name.local)
                         }
@@ -536,42 +537,6 @@ impl ImageResourceData {
     }
 }
 
-pub struct TextInputData {
-    /// A parley TextEditor instance
-    pub editor: Box<parley::PlainEditor<TextBrush>>,
-    /// Whether the input is a singleline or multiline input
-    pub is_multiline: bool,
-}
-
-// FIXME: Implement Clone for PlainEditor
-impl Clone for TextInputData {
-    fn clone(&self) -> Self {
-        TextInputData::new(self.is_multiline)
-    }
-}
-
-impl TextInputData {
-    pub fn new(is_multiline: bool) -> Self {
-        let editor = Box::new(parley::PlainEditor::new(16.0));
-        Self {
-            editor,
-            is_multiline,
-        }
-    }
-
-    pub fn set_text(
-        &mut self,
-        font_ctx: &mut FontContext,
-        layout_ctx: &mut LayoutContext<TextBrush>,
-        text: &str,
-    ) {
-        if self.editor.text() != text {
-            self.editor.set_text(text);
-            self.editor.driver(font_ctx, layout_ctx).refresh_layout();
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct CanvasData {
     pub custom_paint_source_id: u64,
@@ -594,7 +559,7 @@ impl std::fmt::Debug for SpecialElementData {
             SpecialElementData::TableRoot(_) => f.write_str("NodeSpecificData::TableRoot"),
             SpecialElementData::TextInput(_) => f.write_str("NodeSpecificData::TextInput"),
             SpecialElementData::CheckboxInput(_) => f.write_str("NodeSpecificData::CheckboxInput"),
-            #[cfg(feature = "file_input")]
+            #[cfg(feature = "file-input")]
             SpecialElementData::FileInput(_) => f.write_str("NodeSpecificData::FileInput"),
             SpecialElementData::None => f.write_str("NodeSpecificData::None"),
         }
@@ -628,45 +593,7 @@ impl std::fmt::Debug for ListItemLayout {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-/// Parley Brush type for Blitz which contains the Blitz node id
-pub struct TextBrush {
-    /// The node id for the span
-    pub id: usize,
-}
-
-impl TextBrush {
-    pub(crate) fn from_id(id: usize) -> Self {
-        Self { id }
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct TextLayout {
-    pub text: String,
-    pub content_widths: Option<ContentWidths>,
-    pub layout: parley::layout::Layout<TextBrush>,
-}
-
-impl TextLayout {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    pub fn content_widths(&mut self) -> ContentWidths {
-        *self
-            .content_widths
-            .get_or_insert_with(|| self.layout.calculate_content_widths())
-    }
-}
-
-impl std::fmt::Debug for TextLayout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TextLayout")
-    }
-}
-
-#[cfg(feature = "file_input")]
+#[cfg(feature = "file-input")]
 mod file_data {
     use std::ops::{Deref, DerefMut};
     use std::path::PathBuf;
@@ -691,5 +618,141 @@ mod file_data {
         }
     }
 }
-#[cfg(feature = "file_input")]
+#[cfg(feature = "file-input")]
 pub use file_data::FileData;
+
+#[cfg(test)]
+mod tests {
+    use super::TextInputData;
+    use parley::{FontContext, LayoutContext};
+
+    /// Build a [`TextInputData`] with the given text laid out at scale 1.0.
+    fn make_input(is_multiline: bool, text: &str) -> TextInputData {
+        let mut font_ctx = FontContext::new();
+        let mut layout_ctx = LayoutContext::new();
+        let mut data = TextInputData::new(is_multiline);
+        data.editor.set_scale(1.0);
+        data.editor.set_text(text);
+        data.editor
+            .driver(&mut font_ctx, &mut layout_ctx)
+            .refresh_layout();
+        data
+    }
+
+    #[test]
+    fn short_text_does_not_scroll() {
+        let mut data = make_input(false, "hi");
+        // A wide content box that comfortably fits the text.
+        data.clamp_scroll_offset(1000.0, 100.0);
+        assert_eq!(data.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn single_line_scrolls_to_follow_caret() {
+        let text = "the quick brown fox jumps over the lazy dog repeatedly and at length";
+        let mut data = make_input(false, text);
+        let content_box_width = 40.0;
+        let content_box_height = 20.0;
+
+        // Caret at the end of a string that overflows a narrow input should scroll right.
+        data.editor
+            .driver(&mut FontContext::new(), &mut LayoutContext::new())
+            .move_to_text_end();
+        data.clamp_scroll_offset(content_box_width, content_box_height);
+
+        let layout_width = data.editor.try_layout().unwrap().full_width();
+        if layout_width > content_box_width {
+            assert!(
+                data.scroll_offset > 0.0,
+                "expected horizontal scroll for overflowing single-line input"
+            );
+            // The caret must be within the visible region after scrolling.
+            let caret = data.editor.cursor_geometry(1.5).unwrap();
+            assert!(caret.x1 as f32 <= data.scroll_offset + content_box_width + 0.5);
+            assert!(caret.x0 as f32 >= data.scroll_offset - 0.5);
+        }
+
+        // Moving the caret back to the start should reset the scroll offset.
+        data.editor
+            .driver(&mut FontContext::new(), &mut LayoutContext::new())
+            .move_to_text_start();
+        data.clamp_scroll_offset(content_box_width, content_box_height);
+        assert_eq!(data.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn multiline_scrolls_vertically_not_horizontally() {
+        let text = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut data = make_input(true, &text);
+        // Constrain the width so wrapping is well-defined.
+        data.editor.set_width(Some(200.0));
+        data.editor
+            .driver(&mut FontContext::new(), &mut LayoutContext::new())
+            .refresh_layout();
+
+        let content_box_width = 200.0;
+        let content_box_height = 30.0;
+
+        data.editor
+            .driver(&mut FontContext::new(), &mut LayoutContext::new())
+            .move_to_text_end();
+        data.clamp_scroll_offset(content_box_width, content_box_height);
+
+        let layout_height = data.editor.try_layout().unwrap().height();
+        if layout_height > content_box_height {
+            assert!(
+                data.scroll_offset > 0.0,
+                "expected vertical scroll for overflowing multi-line input"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_by_clamps_and_bubbles() {
+        let text = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut data = make_input(true, &text);
+        data.editor.set_width(Some(200.0));
+        data.editor
+            .driver(&mut FontContext::new(), &mut LayoutContext::new())
+            .refresh_layout();
+
+        let content_box_width = 200.0;
+        let content_box_height = 30.0;
+        let max = data.max_scroll_offset(content_box_width, content_box_height);
+        assert!(max > 0.0, "test text should overflow the content box");
+
+        // Scrolling up (positive delta decreases offset) while already at the top is a no-op and
+        // the whole delta bubbles.
+        assert_eq!(data.scroll_offset, 0.0);
+        let bubbled = data.scroll_by(15.0, content_box_width, content_box_height);
+        assert_eq!(data.scroll_offset, 0.0);
+        assert_eq!(bubbled, 15.0);
+
+        // Scrolling down moves the offset and consumes the delta.
+        let bubbled = data.scroll_by(-10.0, content_box_width, content_box_height);
+        assert_eq!(data.scroll_offset, 10.0);
+        assert_eq!(bubbled, 0.0);
+
+        // Scrolling past the end clamps to the maximum and bubbles the remainder. Starting at
+        // offset 10 with max headroom of `max - 10`, a delta of `-(max + 100)` consumes
+        // `max - 10` and bubbles the rest (`-110`).
+        let bubbled = data.scroll_by(-(max + 100.0), content_box_width, content_box_height);
+        assert_eq!(data.scroll_offset, max);
+        assert!((bubbled - (-110.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn single_line_does_not_scroll_when_text_fits() {
+        let mut data = make_input(false, "hi");
+        // Wide content box; nothing to scroll, so all delta bubbles.
+        let bubbled = data.scroll_by(-50.0, 1000.0, 100.0);
+        assert_eq!(data.scroll_offset, 0.0);
+        assert_eq!(bubbled, -50.0);
+    }
+}
