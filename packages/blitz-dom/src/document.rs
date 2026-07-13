@@ -48,6 +48,7 @@ use style::properties::ComputedValues;
 use style::properties::style_structs::Font;
 use style::queries::values::PrefersColorScheme;
 use style::selector_parser::ServoElementSnapshot;
+use style::servo::media_features::PointerCapabilities;
 use style::servo_arc::Arc as ServoArc;
 use style::values::GenericAtomIdent;
 use style::values::computed::ui::CursorKind;
@@ -248,6 +249,11 @@ pub struct BaseDocument {
     pub(crate) click_count: u16,
     /// Whether we're currently in a text selection drag (moved 2px+ from mousedown)
     pub(crate) drag_mode: DragMode,
+    /// The scrollbar thumb currently under the pointer, if any
+    pub(crate) hovered_scrollbar: Option<crate::node::ScrollbarRef>,
+    /// When each scroll container's overlay scrollbars were last shown
+    /// (scrolled, or the pointer left the thumb); drives their fade-out
+    pub(crate) scrollbar_activity: HashMap<usize, Instant>,
     /// Whether and what kind of scroll animation is currently in progress
     pub(crate) scroll_animation: ScrollAnimationState,
 
@@ -321,12 +327,14 @@ pub(crate) fn make_device(
     let width = viewport.window_size.0 as f32 / viewport.scale();
     let height = viewport.window_size.1 as f32 / viewport.scale();
     let viewport_size = euclid::Size2D::new(width, height);
+    let device_size = euclid::Size2D::new(width, height) * viewport.scale();
     let device_pixel_ratio = euclid::Scale::new(viewport.scale());
 
     Device::new(
         media_type,
         selectors::matching::QuirksMode::NoQuirks,
         viewport_size,
+        device_size,
         device_pixel_ratio,
         Box::new(BlitzFontMetricsProvider { font_ctx }),
         ComputedValues::initial_values_with_font_override(Font::initial_values()),
@@ -334,6 +342,8 @@ pub(crate) fn make_device(
             ColorScheme::Light => PrefersColorScheme::Light,
             ColorScheme::Dark => PrefersColorScheme::Dark,
         },
+        PointerCapabilities::default(),
+        PointerCapabilities::default(),
     )
 }
 
@@ -461,6 +471,8 @@ impl BaseDocument {
             mousedown_position: taffy::Point::ZERO,
             click_count: 0,
             drag_mode: DragMode::None,
+            hovered_scrollbar: None,
+            scrollbar_activity: HashMap::new(),
             scroll_animation: ScrollAnimationState::None,
             text_selection: TextSelection::default(),
         };
@@ -1072,9 +1084,9 @@ impl BaseDocument {
                 self.apply_loaded_image(url, image);
             }
             #[cfg(feature = "svg")]
-            Resource::Svg(_kind, tree) => {
+            Resource::Svg(_kind, svg) => {
                 // Create the ImageData and cache it
-                let image = ImageData::Svg(tree);
+                let image = ImageData::Svg(svg);
 
                 let Some(url) = res.resolved_url.as_ref() else {
                     return;
@@ -1176,6 +1188,16 @@ impl BaseDocument {
 
     pub fn snapshot_node(&mut self, node_id: usize) {
         let node = &mut self.nodes[node_id];
+
+        // Do not snapshot nodes that have never been styled. A snapshot records an element's
+        // pre-mutation state so a restyle can diff selector matches then-vs-now. An element
+        // that has never been styled has no "then" to diff against. Snapshotting it anyway
+        // makes Stylo's invalidation unwrap its (absent) primary style and panic.
+        let has_been_styled = node.primary_styles().is_some();
+        if !has_been_styled {
+            return;
+        }
+
         let opaque_node_id = TNode::opaque(&&*node);
         node.has_snapshot = true;
         node.snapshot_handled
@@ -1241,16 +1263,7 @@ impl BaseDocument {
 
     // Takes (x, y) co-ordinates (relative to the )
     pub fn hit(&self, x: f32, y: f32) -> Option<HitResult> {
-        if TDocument::as_node(&&self.nodes[0])
-            .first_element_child()
-            .is_none()
-        {
-            #[cfg(feature = "tracing")]
-            tracing::warn!("No DOM - not resolving hit test");
-            return None;
-        }
-
-        self.root_element().hit(x, y, self.viewport().scale_f64())
+        self.hit_with_scrollbar(x, y).0
     }
 
     pub fn focus_next_node(&mut self) -> Option<usize> {
@@ -1332,14 +1345,105 @@ impl BaseDocument {
         true
     }
 
+    /// The scrollbar thumb currently under the pointer, if any.
+    pub fn hovered_scrollbar(&self) -> Option<crate::node::ScrollbarRef> {
+        self.hovered_scrollbar
+    }
+
+    /// The scrollbar thumb currently being dragged, if any.
+    pub fn scrollbar_drag_target(&self) -> Option<crate::node::ScrollbarRef> {
+        match &self.drag_mode {
+            DragMode::ScrollbarDrag(state) => Some(state.scrollbar),
+            _ => None,
+        }
+    }
+
+    /// The current opacity of `node_id`'s overlay scrollbars. They show at
+    /// full opacity on scroll and fade out after a delay (Chromium's overlay
+    /// timings); the pointer resting on a thumb, or dragging it, holds them
+    /// visible.
+    pub fn scrollbar_opacity(&self, node_id: usize) -> f32 {
+        let interacting = |scrollbar: &crate::node::ScrollbarRef| scrollbar.node_id == node_id;
+        if self.hovered_scrollbar.as_ref().is_some_and(interacting)
+            || self
+                .scrollbar_drag_target()
+                .as_ref()
+                .is_some_and(interacting)
+        {
+            return 1.0;
+        }
+        self.scrollbar_activity.get(&node_id).map_or(0.0, |last| {
+            crate::node::scrollbar::opacity_at(last.elapsed())
+        })
+    }
+
+    /// Show `node_id`'s overlay scrollbars at full opacity and restart their
+    /// fade-out delay.
+    pub(crate) fn show_scrollbars(&mut self, node_id: usize) {
+        if cfg!(feature = "scrollbars") {
+            self.scrollbar_activity.insert(node_id, Instant::now());
+        }
+    }
+
+    /// Whether any overlay scrollbars are awaiting or animating their
+    /// fade-out (so frames must keep rendering until they finish).
+    fn scrollbars_animating(&self) -> bool {
+        use crate::node::scrollbar::{FADE_DELAY, FADE_DURATION};
+        self.scrollbar_activity
+            .values()
+            .any(|last| last.elapsed() < FADE_DELAY + FADE_DURATION)
+    }
+
+    /// [`hit`](Self::hit), also resolving the innermost overlay scrollbar
+    /// thumb under the point (shares the traversal, so it costs nothing
+    /// extra).
+    pub(crate) fn hit_with_scrollbar(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> (Option<HitResult>, Option<crate::node::ScrollbarRef>) {
+        if TDocument::as_node(&&self.nodes[0])
+            .first_element_child()
+            .is_none()
+        {
+            #[cfg(feature = "tracing")]
+            tracing::warn!("No DOM - not resolving hit test");
+            return (None, None);
+        }
+        let mut scrollbar = None;
+        let hit = self
+            .root_element()
+            .hit_inner(x, y, self.viewport().scale_f64(), &mut scrollbar);
+        (hit, scrollbar)
+    }
+
     pub fn set_hover_to(&mut self, x: f32, y: f32) -> bool {
-        let hit = self.hit(x, y);
+        let (hit, hovered_scrollbar) = self.hit_with_scrollbar(x, y);
+        // A faded-out thumb is not interactive: pointer moves never fade
+        // overlay scrollbars back in (only scrolling shows them).
+        let hovered_scrollbar =
+            hovered_scrollbar.filter(|scrollbar| self.scrollbar_opacity(scrollbar.node_id) > 0.0);
+        // Scrollbar-thumb hover is part of hover state: track it here so a
+        // pointer crossing a thumb restyles it even when the hit node (the
+        // content under the overlay thumb) is unchanged.
+        let scrollbar_changed = hovered_scrollbar != self.hovered_scrollbar;
+        if scrollbar_changed {
+            // Entering a thumb restores full opacity mid-fade; leaving one
+            // restarts the fade-out delay.
+            for scrollbar in [self.hovered_scrollbar, hovered_scrollbar]
+                .into_iter()
+                .flatten()
+            {
+                self.show_scrollbars(scrollbar.node_id);
+            }
+        }
+        self.hovered_scrollbar = hovered_scrollbar;
         let hover_node_id = hit.map(|hit| hit.node_id);
         let new_is_text = hit.map(|hit| hit.is_text).unwrap_or(false);
 
         // Return early if the new node is the same as the already-hovered node
         if hover_node_id == self.hover_node_id {
-            return false;
+            return scrollbar_changed;
         }
 
         let old_node_path = self.maybe_node_layout_ancestors(self.hover_node_id);
@@ -1495,6 +1599,7 @@ impl BaseDocument {
             | self.subdoc_is_animating
             | has_custom_widgets
             | (self.scroll_animation != ScrollAnimationState::None)
+            | self.scrollbars_animating()
     }
 
     /// Update the device and reset the stylist to process the new size
@@ -1602,6 +1707,28 @@ impl BaseDocument {
         y: f64,
         mut dispatch_event: F,
     ) -> bool {
+        // Per the CSS overflow propagation rules, the root element's overflow (and usually
+        // the <body>'s) is applied to the viewport, and the element itself must not have
+        // a scrolling mechanism of its own. So scrolls that reach the root element are
+        // forwarded to the viewport rather than scrolling the root element itself.
+        if self.try_root_element().is_some_and(|el| el.id == node_id) {
+            let has_changed = self.scroll_viewport_by_has_changed(x, y);
+            if has_changed {
+                let layout = self.root_element().final_layout;
+                let scale = self.viewport.scale() as f64;
+                let event = BlitzScrollEvent {
+                    scroll_top: self.viewport_scroll.y,
+                    scroll_left: self.viewport_scroll.x,
+                    scroll_width: layout.size.width.max(layout.content_size.width) as i32,
+                    scroll_height: layout.size.height.max(layout.content_size.height) as i32,
+                    client_width: (self.viewport.window_size.0 as f64 / scale) as i32,
+                    client_height: (self.viewport.window_size.1 as f64 / scale) as i32,
+                };
+                dispatch_event(DomEvent::new(node_id, DomEventData::Scroll(event)));
+            }
+            return has_changed;
+        }
+
         let Some(node) = self.nodes.get_mut(node_id) else {
             return false;
         };
@@ -1647,18 +1774,12 @@ impl BaseDocument {
             return has_changed;
         }
 
-        let is_html_or_body = node.data.downcast_element().is_some_and(|e| {
-            let tag = &e.name.local;
-            tag == "html" || tag == "body"
-        });
-
         let (can_x_scroll, can_y_scroll) = node
             .primary_styles()
             .map(|styles| {
                 (
                     matches!(styles.clone_overflow_x(), Overflow::Scroll | Overflow::Auto),
-                    matches!(styles.clone_overflow_y(), Overflow::Scroll | Overflow::Auto)
-                        || (styles.clone_overflow_y() == Overflow::Visible && is_html_or_body),
+                    matches!(styles.clone_overflow_y(), Overflow::Scroll | Overflow::Auto),
                 )
             })
             .unwrap_or((false, false));
@@ -1726,8 +1847,13 @@ impl BaseDocument {
             dispatch_event(DomEvent::new(node_id, DomEventData::Scroll(event)));
         }
 
+        let parent = node.parent;
+        if has_changed {
+            self.show_scrollbars(node_id);
+        }
+
         if bubble_x != 0.0 || bubble_y != 0.0 {
-            if let Some(parent) = node.parent {
+            if let Some(parent) = parent {
                 return self.scroll_node_by_has_changed(parent, bubble_x, bubble_y, dispatch_event)
                     | has_changed;
             } else {
@@ -1744,20 +1870,21 @@ impl BaseDocument {
 
     /// Scroll the viewport by the given values
     pub fn scroll_viewport_by_has_changed(&mut self, x: f64, y: f64) -> bool {
-        let content_size = self.root_element().final_layout.size;
+        // The viewport scrolls the root element's scrollable overflow, which includes both
+        // the root element itself and any content which overflows it (e.g. when the root
+        // element has a fixed height but its content is taller).
+        let root_layout = &self.root_element().final_layout;
+        let content_width = root_layout.size.width.max(root_layout.content_size.width) as f64;
+        let content_height = root_layout.size.height.max(root_layout.content_size.height) as f64;
         let new_scroll = (self.viewport_scroll.x - x, self.viewport_scroll.y - y);
         let window_width = self.viewport.window_size.0 as f64 / self.viewport.scale() as f64;
         let window_height = self.viewport.window_size.1 as f64 / self.viewport.scale() as f64;
 
         let initial = self.viewport_scroll;
-        self.viewport_scroll.x = f64::max(
-            0.0,
-            f64::min(new_scroll.0, content_size.width as f64 - window_width),
-        );
-        self.viewport_scroll.y = f64::max(
-            0.0,
-            f64::min(new_scroll.1, content_size.height as f64 - window_height),
-        );
+        self.viewport_scroll.x =
+            f64::max(0.0, f64::min(new_scroll.0, content_width - window_width));
+        self.viewport_scroll.y =
+            f64::max(0.0, f64::min(new_scroll.1, content_height - window_height));
 
         self.viewport_scroll != initial
     }
@@ -1782,6 +1909,68 @@ impl BaseDocument {
 
     pub fn set_viewport_scroll(&mut self, scroll: crate::Point<f64>) {
         self.viewport_scroll = scroll;
+    }
+
+    /// Find the node targeted by a URL fragment (the `#...` part of a URL).
+    ///
+    /// Per the HTML spec, this is the element whose `id` matches the fragment, falling
+    /// back to the first `<a>` element whose `name` attribute matches.
+    pub fn get_fragment_target(&self, fragment: &str) -> Option<usize> {
+        if let Some(node_id) = self.get_element_by_id(fragment) {
+            return Some(node_id);
+        }
+
+        // Fall back to a named anchor: `<a name="...">`
+        self.nodes.iter().find_map(|(id, node)| {
+            let el = node.element_data()?;
+            (el.name.local == local_name!("a") && el.attr(local_name!("name")) == Some(fragment))
+                .then_some(id)
+        })
+    }
+
+    /// Scroll the viewport so that the given node is aligned with the top of the viewport.
+    pub fn scroll_to_node(&mut self, node_id: usize) {
+        let Some(node) = self.nodes.get(node_id) else {
+            return;
+        };
+
+        // `absolute_position` gives the node's position in document space (it does not
+        // account for the viewport scroll), so it is the scroll offset we want to land on.
+        let target = node.absolute_position(0.0, 0.0);
+        let current = self.viewport_scroll;
+
+        // `scroll_viewport_by` subtracts the delta from the current scroll offset, so pass
+        // `current - target` in order to land on `target`.
+        self.scroll_viewport_by(current.x - target.x as f64, current.y - target.y as f64);
+    }
+
+    /// Scroll to the element targeted by the given URL fragment (the `#...` part of a URL).
+    ///
+    /// An empty fragment (or a `top` fragment that matches no element) scrolls to the top
+    /// of the document, matching browser behaviour. Returns `true` if a scroll target was
+    /// found.
+    pub fn scroll_to_fragment(&mut self, fragment: &str) -> bool {
+        // Fragments are percent-encoded in URLs (e.g. `%20`); decode before matching.
+        let decoded = percent_encoding::percent_decode_str(fragment)
+            .decode_utf8_lossy()
+            .into_owned();
+
+        if !decoded.is_empty() {
+            if let Some(node_id) = self.get_fragment_target(&decoded) {
+                self.scroll_to_node(node_id);
+                return true;
+            }
+        }
+
+        // An empty fragment, or the special "top" fragment when no matching element exists,
+        // scrolls to the top of the document.
+        if decoded.is_empty() || decoded.eq_ignore_ascii_case("top") {
+            let current = self.viewport_scroll;
+            self.scroll_viewport_by(current.x, current.y);
+            return true;
+        }
+
+        false
     }
 
     /// Computes the size and position of the `Node` relative to the viewport

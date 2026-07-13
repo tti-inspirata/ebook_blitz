@@ -39,6 +39,12 @@ use taffy::{
 use super::stylo_data::StyloData;
 use super::{Attribute, ElementData};
 
+#[derive(Clone, Copy)]
+enum OutputStyle {
+    Normal,
+    Pretty,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayOuter {
     Block,
@@ -727,7 +733,7 @@ impl Node {
                 write!(
                     s,
                     "TEXT {}",
-                    &std::str::from_utf8(bytes.split_at(10.min(bytes.len())).0)
+                    std::str::from_utf8(bytes.split_at(10.min(bytes.len())).0)
                         .unwrap_or("INVALID UTF8")
                 )
             }
@@ -760,13 +766,50 @@ impl Node {
         s
     }
 
+    /// Renders the HTML of this node and all its children as a `String` without extra whitespace.
+    ///
+    /// Example output:
+    ///
+    /// ```text
+    /// <html><head /><body><main id="main"><div class="arbitrary-class" /></main></body></html>
+    /// ```
     pub fn outer_html(&self) -> String {
         let mut output = String::new();
         self.write_outer_html(&mut output);
         output
     }
 
+    /// Renders the HTML of this node and all its children as a `String` with whitespace for human
+    /// readability.
+    ///
+    /// Example output:
+    ///
+    /// ```text
+    /// <html>
+    ///   <head />
+    ///   <body>
+    ///     <main id="main">
+    ///       <div class="arbitrary-class" />
+    ///     </main>
+    ///   </body>
+    /// </html>
+    /// ```
+    pub fn outer_html_pretty(&self) -> String {
+        let mut output = String::new();
+        self.write_outer_html_pretty(&mut output);
+        output
+    }
+
     pub fn write_outer_html(&self, writer: &mut String) {
+        self.write_outer_html_in_style(writer, OutputStyle::Normal, 0);
+    }
+
+    pub fn write_outer_html_pretty(&self, writer: &mut String) {
+        self.write_outer_html_in_style(writer, OutputStyle::Pretty, 0);
+    }
+
+    fn write_outer_html_in_style(&self, writer: &mut String, style: OutputStyle, nesting: usize) {
+        const INDENT: &str = "  ";
         let has_children = !self.children.is_empty();
         let current_color = self
             .primary_styles()
@@ -779,9 +822,22 @@ impl Node {
             NodeData::AnonymousBlock(_) => {}
             // NodeData::Doctype { name, .. } => write!(s, "DOCTYPE {name}"),
             NodeData::Text(data) => {
+                if matches!(style, OutputStyle::Pretty) {
+                    for _ in 0..nesting {
+                        writer.push_str(INDENT);
+                    }
+                }
                 writer.push_str(data.content.as_str());
+                if matches!(style, OutputStyle::Pretty) {
+                    writer.push('\n');
+                }
             }
             NodeData::Element(data) => {
+                if matches!(style, OutputStyle::Pretty) {
+                    for _ in 0..nesting {
+                        writer.push_str(INDENT);
+                    }
+                }
                 writer.push('<');
                 writer.push_str(&data.name.local);
 
@@ -804,15 +860,26 @@ impl Node {
                     writer.push_str(" /");
                 }
                 writer.push('>');
+                if matches!(style, OutputStyle::Pretty) {
+                    writer.push('\n');
+                }
 
                 if has_children {
                     for &child_id in &self.children {
-                        self.tree()[child_id].write_outer_html(writer);
+                        self.tree()[child_id].write_outer_html_in_style(writer, style, nesting + 1);
                     }
 
+                    if matches!(style, OutputStyle::Pretty) {
+                        for _ in 0..nesting {
+                            writer.push_str(INDENT);
+                        }
+                    }
                     writer.push_str("</");
                     writer.push_str(&data.name.local);
                     writer.push('>');
+                    if matches!(style, OutputStyle::Pretty) {
+                        writer.push('\n');
+                    }
                 }
             }
         }
@@ -918,6 +985,20 @@ impl Node {
     /// TODO: z-index
     /// (If multiple children are positioned at the position then a random one will be recursed into)
     pub fn hit(&self, x: f32, y: f32, scale: f64) -> Option<HitResult> {
+        self.hit_inner(x, y, scale, &mut None)
+    }
+
+    /// [`hit`](Self::hit), also resolving the innermost overlay scrollbar
+    /// thumb under the point into `scrollbar` during the same descent (so
+    /// thumb hit-testing shares the exact coordinate handling — transforms
+    /// included — of every other hit test).
+    pub(crate) fn hit_inner(
+        &self,
+        x: f32,
+        y: f32,
+        scale: f64,
+        scrollbar: &mut Option<crate::node::ScrollbarRef>,
+    ) -> Option<HitResult> {
         use style::computed_values::pointer_events::T as PointerEvents;
         use style::computed_values::visibility::T as Visibility;
 
@@ -982,6 +1063,17 @@ impl Node {
             return None;
         }
 
+        // Descendants overwrite, so the innermost scroll container's thumb
+        // wins. Thumb coords are border-box relative (unscrolled).
+        if matches_self
+            && let Some(sb) = self.scrollbar_at_local(
+                (x - self.scroll_offset.x as f32) as f64,
+                (y - self.scroll_offset.y as f32) as f64,
+            )
+        {
+            *scrollbar = Some(sb);
+        }
+
         if self.flags.is_inline_root() {
             let content_box_offset = taffy::Point {
                 x: self.final_layout.padding.left + self.final_layout.border.left,
@@ -997,7 +1089,10 @@ impl Node {
                 for hoisted_child in hoisted.pos_z_hoisted_children().rev() {
                     let x = x - hoisted_child.position.x;
                     let y = y - hoisted_child.position.y;
-                    if let Some(hit) = self.with(hoisted_child.node_id).hit(x, y, scale) {
+                    if let Some(hit) = self
+                        .with(hoisted_child.node_id)
+                        .hit_inner(x, y, scale, scrollbar)
+                    {
                         return Some(hit);
                     }
                 }
@@ -1006,7 +1101,7 @@ impl Node {
 
         // Call `.hit()` on each child in turn. If any return `Some` then return that value. Else return `Some(self.id).
         for child_id in self.paint_children.borrow().iter().flatten().rev() {
-            if let Some(hit) = self.with(*child_id).hit(x, y, scale) {
+            if let Some(hit) = self.with(*child_id).hit_inner(x, y, scale, scrollbar) {
                 return Some(hit);
             }
         }
@@ -1017,7 +1112,10 @@ impl Node {
                 for hoisted_child in hoisted.neg_z_hoisted_children().rev() {
                     let x = x - hoisted_child.position.x;
                     let y = y - hoisted_child.position.y;
-                    if let Some(hit) = self.with(hoisted_child.node_id).hit(x, y, scale) {
+                    if let Some(hit) = self
+                        .with(hoisted_child.node_id)
+                        .hit_inner(x, y, scale, scrollbar)
+                    {
                         return Some(hit);
                     }
                 }
@@ -1073,10 +1171,8 @@ impl Node {
             if node.flags.is_inline_root() {
                 return Some(node);
             }
-            match node.layout_parent.get() {
-                Some(id) => node = self.with(id),
-                None => return None,
-            }
+            let id = node.layout_parent.get()?;
+            node = self.with(id);
         }
     }
 

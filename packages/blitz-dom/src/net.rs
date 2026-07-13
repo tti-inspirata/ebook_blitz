@@ -60,7 +60,7 @@ pub struct FontFaceOverrides {
 pub enum Resource {
     Image(ImageType, u32, u32, Arc<Vec<u8>>),
     #[cfg(feature = "svg")]
-    Svg(ImageType, Arc<usvg::Tree>),
+    Svg(ImageType, crate::node::SvgImageData),
     Css(DocumentStyleSheet),
     Font(Bytes, FontFaceOverrides),
     None,
@@ -392,7 +392,7 @@ pub(crate) fn fetch_font_face(
                     weight: descriptor
                         .font_weight
                         .as_ref()
-                        .map(|range| range.0.compute().value()),
+                        .and_then(|range| range.0.compute().map(|w| w.value())),
                     style: descriptor.font_style.as_ref().map(stylo_to_fontique_style),
                 };
                 Some((src, overrides))
@@ -488,10 +488,10 @@ fn stylo_to_fontique_style(style: &StyloFontStyle) -> parley::fontique::FontStyl
             // Stylo emits `Oblique(0deg, 0deg)` for the literal CSS `normal`
             // keyword. Map that back to `Normal` so parley's font matching
             // doesn't misclassify upright fonts.
-            if angle == 0.0 && max.degrees() == 0.0 {
+            if angle.is_none_or(|a| a == 0.0) && max.degrees().is_none_or(|a| a == 0.0) {
                 Fq::Normal
             } else {
-                Fq::Oblique(Some(angle))
+                Fq::Oblique(angle)
             }
         }
     }
@@ -534,9 +534,9 @@ impl ImageHandler {
 
         #[cfg(feature = "svg")]
         let svg_err = {
-            use crate::util::parse_svg;
-            match parse_svg(&bytes) {
-                Ok(tree) => return Ok(Resource::Svg(self.kind, Arc::new(tree))),
+            use crate::util::parse_svg_image;
+            match parse_svg_image(&bytes) {
+                Ok(svg) => return Ok(Resource::Svg(self.kind, svg)),
                 Err(e) => e.to_string(),
             }
         };
@@ -557,10 +557,7 @@ mod tests {
     use style::values::specified::Angle;
 
     fn oblique(min_deg: f32, max_deg: f32) -> StyloFontStyle {
-        StyloFontStyle::Oblique(
-            Angle::from_degrees(min_deg, false),
-            Angle::from_degrees(max_deg, false),
-        )
+        StyloFontStyle::Oblique(Angle::from_degrees(min_deg), Angle::from_degrees(max_deg))
     }
 
     #[test]

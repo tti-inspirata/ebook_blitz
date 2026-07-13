@@ -27,7 +27,7 @@ exclude = ["sites"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0-alpha.6"
+version = "0.3.0-beta.1"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/dioxuslabs/blitz"
 repository = "https://github.com/dioxuslabs/blitz"
@@ -37,14 +37,14 @@ rust-version = "1.89.0"
 
 [workspace.dependencies]
 # Blitz dependencies(in-repo)
-blitz = { version = "=0.3.0-alpha.6", path = "./packages/blitz" }
-blitz-dom = { version = "=0.3.0-alpha.6", path = "./packages/blitz-dom", default-features = false }
-blitz-html = { version = "=0.3.0-alpha.6", path = "./packages/blitz-html", default-features = false }
-blitz-net = { version = "=0.3.0-alpha.6", path = "./packages/blitz-net", default-features = false }
-blitz-paint = { version = "=0.3.0-alpha.6", path = "./packages/blitz-paint", default-features = false }
-blitz-shell = { version = "=0.3.0-alpha.6", path = "./packages/blitz-shell", default-features = false }
-blitz-traits = { version = "=0.3.0-alpha.6", path = "./packages/blitz-traits", default-features = false }
-stylo_taffy = { version = "=0.3.0-alpha.6", path = "./packages/stylo_taffy", default-features = false }
+blitz = { version = "=0.3.0-beta.1", path = "./packages/blitz" }
+blitz-dom = { version = "=0.3.0-beta.1", path = "./packages/blitz-dom", default-features = false }
+blitz-html = { version = "=0.3.0-beta.1", path = "./packages/blitz-html", default-features = false }
+blitz-net = { version = "=0.3.0-beta.1", path = "./packages/blitz-net", default-features = false }
+blitz-paint = { version = "=0.3.0-beta.1", path = "./packages/blitz-paint", default-features = false }
+blitz-shell = { version = "=0.3.0-beta.1", path = "./packages/blitz-shell", default-features = false }
+blitz-traits = { version = "=0.3.0-beta.1", path = "./packages/blitz-traits", default-features = false }
+stylo_taffy = { version = "=0.3.0-beta.1", path = "./packages/stylo_taffy", default-features = false }
 dioxus-native = { version = "0.7.0", path = "./packages/dioxus-native", default-features = false }
 dioxus-native-dom = { version = "0.7.0", path = "./packages/dioxus-native-dom", default-features = false }
 debug_timer = { version = "0.1.2", path = "./packages/debug_timer" }
@@ -52,12 +52,12 @@ accesskit_xplat = { version = "0.1", path = "./packages/accesskit_xplat", defaul
 browser-persistence = { path = "./apps/browser/persistence" }
 
 # Servo dependencies
-style = { version = "0.18.0", package = "stylo" }
-style_traits = { version = "0.18.0", package = "stylo_traits" }
-style_atoms = { version = "0.18.0", package = "stylo_atoms" }
-style_config = { version = "0.18.0", package = "stylo_static_prefs" }
-style_dom = { version = "0.18.0", package = "stylo_dom" }
-selectors = { version = "0.38.0", package = "selectors" }
+style = { version = "0.19.0", package = "stylo" }
+style_traits = { version = "0.19.0", package = "stylo_traits" }
+style_atoms = { version = "0.19.0", package = "stylo_atoms" }
+style_config = { version = "0.19.0", package = "stylo_static_prefs" }
+style_dom = { version = "0.19.0", package = "stylo_dom" }
+selectors = { version = "0.39.0", package = "selectors" }
 cssparser = { version = "0.37.0" }
 
 # HTML5ever dependencies
@@ -91,7 +91,7 @@ dioxus-cli-config = { version = "0.7.3" }
 dioxus-core-macro = { version = "0.7.3" }
 
 # Taffy + Parley + Fontations
-taffy = { version = "=0.11.0-experimental-cache-fix.3", default-features = false, features = [
+taffy = { version = "0.12.1", default-features = false, features = [
     "std",
     "flexbox",
     "grid",
@@ -166,6 +166,7 @@ console_error_panic_hook = "0.1"
 rustc-hash = "2.1.2"
 bytes = "1.7.1"
 slab = "0.4.9"
+slotmap = "1.0.7"
 tracing = "0.1.40"
 tracing-subscriber = "0.3"
 futures-util = "0.3.30"

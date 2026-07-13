@@ -580,8 +580,7 @@ impl ModifiersInteraction for NativeWheelData {
 
 impl InteractionElementOffset for NativeWheelData {
     fn element_coordinates(&self) -> ElementPoint {
-        // TODO: implement element point
-        ElementPoint::new(0.0, 0.0)
+        ElementPoint::new(self.0.element_x() as f64, self.0.element_y() as f64)
     }
 }
 
@@ -597,6 +596,12 @@ impl InteractionLocation for NativeWheelData {
     fn page_coordinates(&self) -> PagePoint {
         PagePoint::new(self.0.page_x() as f64, self.0.page_y() as f64)
     }
+}
+
+pub fn synthetic_click_event(node: &Node, modifiers: Modifiers) -> Box<dyn Any> {
+    Box::new(NativePointerData(
+        node.synthetic_click_event_data(modifiers),
+    ))
 }
 
 #[cfg(test)]
