@@ -672,6 +672,15 @@ impl BaseDocument {
         for line in inline_layout.layout.lines() {
             for item in line.items() {
                 if let parley::layout::PositionedLayoutItem::InlineBox(ibox) = item {
+                    let zero_sized_positioning_container = {
+                        let node = &self.nodes[ibox.id as usize];
+                        ibox.width == 0.0
+                            && ibox.height == 0.0
+                            && node.style.position == Position::Relative
+                            && node.children.iter().any(|child_id| {
+                                self.nodes[*child_id].style.position == Position::Absolute
+                            })
+                    };
                     let node = &mut self.nodes[ibox.id as usize];
                     let padding = node
                         .style
@@ -703,7 +712,17 @@ impl BaseDocument {
                         layout.size.width = (ibox.width / scale) - margin.left - margin.right;
                         layout.size.height = (ibox.height / scale) - margin.top - margin.bottom;
                         layout.location.x = (ibox.x / scale) + margin.left + container_pb.left;
-                        layout.location.y = (ibox.y / scale) + margin.top + container_pb.top;
+                        // A zero-sized inline positioning container contributes no baseline box of
+                        // its own. Its absolutely positioned descendants therefore use the
+                        // adjacent text's real ink top as their static-position anchor, rather
+                        // than the baseline or the line-box top (which includes leading).
+                        // Parley exposes the required baseline/ascent metrics directly.
+                        let inline_box_y = if zero_sized_positioning_container {
+                            line.metrics().baseline - line.metrics().ascent
+                        } else {
+                            ibox.y
+                        };
+                        layout.location.y = (inline_box_y / scale) + margin.top + container_pb.top;
                         layout.padding = padding; //.map(|p| p / scale);
                         layout.border = border; //.map(|p| p / scale);
                     }

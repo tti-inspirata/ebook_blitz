@@ -170,6 +170,27 @@ impl BaseDocument {
             overflow = overflow.union(child_rect_in_self);
         }
 
+        // Positioned descendants with a non-auto z-index are hoisted out of
+        // `paint_children`, but they still contribute visible overflow to their
+        // stacking-context root. Without this, an opacity/filter layer clips a
+        // negative-z absolute child to its parent's border box before it can be
+        // painted (for example the arrow below a page-marker bubble).
+        let hoisted_child_ids = self.nodes[node_id]
+            .stacking_context
+            .as_ref()
+            .map(|stacking_context| {
+                stacking_context
+                    .neg_z_hoisted_children()
+                    .chain(stacking_context.pos_z_hoisted_children())
+                    .map(|child| child.node_id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for child_id in hoisted_child_ids {
+            let child_rect_in_self = self.resolve_transforms(child_id);
+            overflow = overflow.union(child_rect_in_self);
+        }
+
         self.nodes[node_id].scrollable_overflow = overflow;
         *self.nodes[node_id].layout_children.get_mut() = layout_children;
 

@@ -847,6 +847,28 @@ pub(crate) fn find_inline_layout_embedded_boxes(
                     }
                 }
 
+                // An absolutely positioned inline-flow element is out of the
+                // Parley text flow, but it still owns a layout/paint subtree.
+                // Previously we recursed through it as if it were a transparent
+                // inline span, so neither it nor nested absolute descendants were
+                // registered in the Taffy/paint tree.
+                if node
+                    .primary_styles()
+                    .is_some_and(|style| style.clone_position().is_absolutely_positioned())
+                {
+                    let mut positioned_children = Vec::new();
+                    if let Some(before) = node.before {
+                        positioned_children.push(before);
+                    }
+                    positioned_children.extend(node.children.iter().copied());
+                    if let Some(after) = node.after {
+                        positioned_children.push(after);
+                    }
+                    *node.layout_children.borrow_mut() = Some(positioned_children);
+                    layout_children.push(node_id);
+                    return;
+                }
+
                 let display = node.display_style().unwrap_or(Display::inline());
 
                 match (display.outside(), display.inside()) {

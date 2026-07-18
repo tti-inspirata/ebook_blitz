@@ -383,6 +383,14 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     .unwrap_or(Rect::ZERO);
 
                 let mut effect_layer_clip = cx.frame.border_box_path().bounding_box();
+                // Opacity/filter layers must include visible descendant overflow.
+                // A positioned child such as a page-marker arrow can legitimately
+                // extend below the parent's border box; clipping the effect layer
+                // to that box makes the child disappear whenever opacity < 1.
+                // Both the layer shape and `scrollable_overflow` are consumed in
+                // the renderer's physical-pixel coordinate space at this point.
+                let overflow = node.scrollable_overflow;
+                effect_layer_clip = effect_layer_clip.union(overflow);
                 effect_layer_clip.x0 += filter_expansion_area.x0;
                 effect_layer_clip.y0 += filter_expansion_area.y0;
                 effect_layer_clip.x1 += filter_expansion_area.x1;
