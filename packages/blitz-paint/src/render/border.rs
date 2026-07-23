@@ -536,24 +536,28 @@ impl ElementCx<'_, '_> {
 
         let outer_border_style = self.style.get_border();
 
-        // 网格(单元格)布局位于表格的 content-box 内(被表格自身的 border/padding 内缩),
-        // 而下面的 Rect 坐标是相对网格原点的。需把绘制原点平移到 content-box,
-        // 否则边框线会相对单元格内容整体偏移(约表格 border 宽),与表头背景错位。
-        let content_origin = self.frame.content_box.origin();
-        let transform = self.transform * Affine::translate((content_origin.x, content_origin.y));
-
         let cols = &grid_info.columns;
         let rows = &grid_info.rows;
 
-        // 网格轨道之和(inner_width/height)对应的是含表格边框的宽度,但绘制原点已内缩到
-        // content-box。上游把表格改成 Taffy 原生布局后,grid_info 的轨道尺寸比 content-box
-        // 略宽(约一个表格 border),直接用会让最右/最下的合并边框线越过单元格背景右/下缘。
-        // 夹到 content-box 尺寸内,保证边框线不超出单元格区域(旧网格模型下二者相等,不受影响)。
+        // 网格轨道之和即单元格区域的尺寸(轨道首尾的 gutter 为 0,内部 gutter 才是网格线)。
         let inner_width = (cols.sizes.iter().sum::<f32>() + cols.gutters.iter().sum::<f32>()) as f64;
         let inner_height =
             (rows.sizes.iter().sum::<f32>() + rows.gutters.iter().sum::<f32>()) as f64;
-        let inner_width = inner_width.min(self.frame.content_box.width() / self.scale);
-        let inner_height = inner_height.min(self.frame.content_box.height() / self.scale);
+
+        // collapse 模式下 layout::table 把表格的 taffy border 覆写成了单元格边框宽,
+        // 用来容纳表格四周那圈合并边线。这圈空间在网格轨道之外,且上下/左右未必等宽
+        // (如单元格只设 border-bottom 时左右为 0),不能按 content-box 与网格的尺寸差
+        // 平摊。直接取首个单元格的布局位置作为网格原点——它相对表格 border-box,
+        // 已包含表格自身的 border/padding 与这圈边线空间,是精确值。
+        let grid_origin = table
+            .cells
+            .first()
+            .map(|cell| self.context.dom.as_ref().tree()[cell.node_id].final_layout.location)
+            .map(|loc| (loc.x as f64, loc.y as f64))
+            .unwrap_or((0.0, 0.0));
+        let (outer_x, outer_y) = grid_origin;
+        let transform = self.transform
+            * Affine::translate((outer_x * self.scale, outer_y * self.scale));
 
         let current_color = self.style.clone_color();
         let resolve = |color: &style::values::computed::Color| {
@@ -582,27 +586,94 @@ impl ElementCx<'_, '_> {
             None
         };
 
-        // Draw horizontal inner borders
-        if let Some(color) = h_inner.filter(|c| c.components[3] > 0.0) {
-            let mut y = 0.0;
-            for (&height, &gutter) in rows.sizes.iter().zip(rows.gutters.iter()) {
-                let shape =
-                    Rect::new(0.0, y, inner_width, y + gutter as f64).scale_from_origin(self.scale);
-                scene.fill(Fill::NonZero, transform, color, None, &shape);
+        let n_cols = cols.sizes.len();
+        let n_rows = rows.sizes.len();
 
-                y += (height + gutter) as f64;
+        // Taffy 的轨道布局是 [gutter, track, gutter, track, ..., gutter],
+        // 即 gutters.len() == sizes.len() + 1:每条网格线对应一个 gutter,
+        // 首尾两条分别是表格的上/左与下/右边线。返回第 k 条线(0-based)的起始偏移。
+        let line_offsets = |sizes: &[f32], gutters: &[f32]| -> Vec<f64> {
+            let mut offsets = Vec::with_capacity(gutters.len());
+            let mut pos = 0.0f64;
+            for (k, &gutter) in gutters.iter().enumerate() {
+                offsets.push(pos);
+                pos += gutter as f64 + sizes.get(k).copied().unwrap_or(0.0) as f64;
+            }
+            offsets
+        };
+        let col_lines = line_offsets(&cols.sizes, &cols.gutters);
+        let row_lines = line_offsets(&rows.sizes, &rows.gutters);
+
+        // 合并单元格(colspan/rowspan)的内部不应被网格线穿过。taffy 的 detailed grid
+        // info 给出每个单元格占据的 1-indexed 网格线区间,据此标记要跳过的线段:
+        // 被单元格「跨越」(而非作为边界)的那些线,在该单元格覆盖的行/列上不绘制。
+        let mut skip_h = vec![false; (n_rows + 1) * n_cols.max(1)]; // 行线 × 列
+        let mut skip_v = vec![false; (n_cols + 1) * n_rows.max(1)]; // 列线 × 行
+        for item in &grid_info.items {
+            let (row_start, row_end) = (item.row_start as usize, item.row_end as usize);
+            let (col_start, col_end) = (item.column_start as usize, item.column_end as usize);
+            if row_start == 0 || col_start == 0 || row_end <= row_start || col_end <= col_start {
+                continue;
+            }
+            // 被 rowspan 跨越的水平线
+            for line in (row_start + 1)..row_end.min(n_rows + 2) {
+                for col in col_start..col_end.min(n_cols + 1) {
+                    skip_h[(line - 1) * n_cols.max(1) + (col - 1)] = true;
+                }
+            }
+            // 被 colspan 跨越的垂直线
+            for line in (col_start + 1)..col_end.min(n_cols + 2) {
+                for row in row_start..row_end.min(n_rows + 1) {
+                    skip_v[(line - 1) * n_rows.max(1) + (row - 1)] = true;
+                }
             }
         }
 
-        // Draw vertical inner borders
-        if let Some(color) = v_inner.filter(|c| c.components[3] > 0.0) {
-            let mut x = 0.0;
-            for (&width, &gutter) in cols.sizes.iter().zip(cols.gutters.iter()) {
-                let shape = Rect::new(x, 0.0, x + gutter as f64, inner_height)
-                    .scale_from_origin(self.scale);
-                scene.fill(Fill::NonZero, transform, color, None, &shape);
+        // Draw horizontal borders
+        if let Some(color) = h_inner.filter(|c| c.components[3] > 0.0) {
+            for (line, (&y, &gutter)) in row_lines.iter().zip(rows.gutters.iter()).enumerate() {
+                let (y0, y1) = (y, (y + gutter as f64).min(inner_height));
+                if gutter <= 0.0 || y0 >= inner_height {
+                    continue;
+                }
+                // 逐列绘制线段(每段含两侧的竖 gutter,保证与竖线的交叉点填满),
+                // 跳过被 rowspan 单元格跨越的列。
+                for col in 0..n_cols {
+                    if skip_h[line * n_cols.max(1) + col] {
+                        continue;
+                    }
+                    let x0 = col_lines[col];
+                    let x1 = col_lines
+                        .get(col + 1)
+                        .map(|&x| x + cols.gutters.get(col + 1).copied().unwrap_or(0.0) as f64)
+                        .unwrap_or(inner_width)
+                        .min(inner_width);
+                    let shape = Rect::new(x0, y0, x1, y1).scale_from_origin(self.scale);
+                    scene.fill(Fill::NonZero, transform, color, None, &shape);
+                }
+            }
+        }
 
-                x += (width + gutter) as f64;
+        // Draw vertical borders
+        if let Some(color) = v_inner.filter(|c| c.components[3] > 0.0) {
+            for (line, (&x, &gutter)) in col_lines.iter().zip(cols.gutters.iter()).enumerate() {
+                let (x0, x1) = (x, (x + gutter as f64).min(inner_width));
+                if gutter <= 0.0 || x0 >= inner_width {
+                    continue;
+                }
+                for row in 0..n_rows {
+                    if skip_v[line * n_rows.max(1) + row] {
+                        continue;
+                    }
+                    let y0 = row_lines[row];
+                    let y1 = row_lines
+                        .get(row + 1)
+                        .map(|&y| y + rows.gutters.get(row + 1).copied().unwrap_or(0.0) as f64)
+                        .unwrap_or(inner_height)
+                        .min(inner_height);
+                    let shape = Rect::new(x0, y0, x1, y1).scale_from_origin(self.scale);
+                    scene.fill(Fill::NonZero, transform, color, None, &shape);
+                }
             }
         }
 
@@ -665,6 +736,74 @@ impl ElementCx<'_, '_> {
             let shape = Rect::new(inner_width, 0.0, inner_width + w, inner_height)
                 .scale_from_origin(self.scale);
             scene.fill(Fill::NonZero, transform, color, None, &shape);
+        }
+
+        // 表格自身未设某边 border 时,collapse 下该边的外框由边缘单元格的 border 提供
+        // (对齐浏览器:`table{border-collapse:collapse}` 且只有 td 设 border 时表格四周仍有边线)。
+        // collapse 模式下 taffy 给表格留出了等于单元格边框宽的 border 区(见 layout::table),
+        // 网格轨道的首尾 gutter 为 0,故这圈外框画在 content-box 外侧的 border 区内,
+        // 不会越出 border-box,也就不受上面 overflow 裁剪的影响。
+        let table_edge_visible = |style: BorderStyle, width: f64| {
+            width > 0.0 && !matches!(style, BorderStyle::None | BorderStyle::Hidden)
+        };
+        let (bw_top, bw_left) = (outer_y, outer_x);
+        let bw_right = (self.frame.border_box.width() / self.scale - inner_width - outer_x).max(0.0);
+        let bw_bottom =
+            (self.frame.border_box.height() / self.scale - inner_height - outer_y).max(0.0);
+
+        if let Some(color) = h_inner.filter(|c| c.components[3] > 0.0) {
+            if bw_top > 0.0
+                && !table_edge_visible(
+                    outer_border_style.border_top_style,
+                    outer_border_style.border_top_width.0.to_f64_px(),
+                )
+            {
+                let shape = Rect::new(-bw_left, -bw_top, inner_width + bw_right, 0.0)
+                    .scale_from_origin(self.scale);
+                scene.fill(Fill::NonZero, transform, color, None, &shape);
+            }
+            if bw_bottom > 0.0
+                && !table_edge_visible(
+                    outer_border_style.border_bottom_style,
+                    outer_border_style.border_bottom_width.0.to_f64_px(),
+                )
+            {
+                let shape = Rect::new(
+                    -bw_left,
+                    inner_height,
+                    inner_width + bw_right,
+                    inner_height + bw_bottom,
+                )
+                .scale_from_origin(self.scale);
+                scene.fill(Fill::NonZero, transform, color, None, &shape);
+            }
+        }
+        if let Some(color) = v_inner.filter(|c| c.components[3] > 0.0) {
+            if bw_left > 0.0
+                && !table_edge_visible(
+                    outer_border_style.border_left_style,
+                    outer_border_style.border_left_width.0.to_f64_px(),
+                )
+            {
+                let shape = Rect::new(-bw_left, -bw_top, 0.0, inner_height + bw_bottom)
+                    .scale_from_origin(self.scale);
+                scene.fill(Fill::NonZero, transform, color, None, &shape);
+            }
+            if bw_right > 0.0
+                && !table_edge_visible(
+                    outer_border_style.border_right_style,
+                    outer_border_style.border_right_width.0.to_f64_px(),
+                )
+            {
+                let shape = Rect::new(
+                    inner_width,
+                    -bw_top,
+                    inner_width + bw_right,
+                    inner_height + bw_bottom,
+                )
+                .scale_from_origin(self.scale);
+                scene.fill(Fill::NonZero, transform, color, None, &shape);
+            }
         }
     }
 
