@@ -18,6 +18,7 @@ members = [
     "apps/bump",
     "wpt/runner",
     "examples/counter",
+    "examples/transparent",
     "examples/seven_guis",
     "examples/todomvc",
     "examples/wgpu_texture",
@@ -52,12 +53,12 @@ accesskit_xplat = { version = "0.1", path = "./packages/accesskit_xplat", defaul
 browser-persistence = { path = "./apps/browser/persistence" }
 
 # Servo dependencies
-style = { version = "0.19.0", package = "stylo" }
-style_traits = { version = "0.19.0", package = "stylo_traits" }
-style_atoms = { version = "0.19.0", package = "stylo_atoms" }
-style_config = { version = "0.19.0", package = "stylo_static_prefs" }
-style_dom = { version = "0.19.0", package = "stylo_dom" }
-selectors = { version = "0.39.0", package = "selectors" }
+style = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo" }
+style_traits = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo_traits" }
+style_atoms = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo_atoms" }
+style_config = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo_static_prefs" }
+style_dom = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo_dom" }
+selectors = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "selectors" }
 cssparser = { version = "0.37.0" }
 
 # HTML5ever dependencies
@@ -70,6 +71,7 @@ euclid = "0.22"
 atomic_refcell = "0.1.13"
 app_units = "0.7.5"
 smallvec = "1"
+thin-vec = "0.2"
 
 # DioxusLabs dependencies
 dioxus = { version = "0.7.3" }
@@ -106,14 +108,14 @@ skrifa = { version = "0.43", default-features = false, features = [
 ] } # Should match parley and vello versions
 
 # AnyRender
-anyrender = { version = "0.11.0" }
-anyrender_serialize = { version = "0.5.0" }
-anyrender_skia = { version = "0.9.0" }
-anyrender_vello = { version = "0.12.0" }
-anyrender_vello_cpu = { version = "0.14.0" }
-anyrender_vello_hybrid = { version = "0.8.0" }
-anyrender_svg = { version = "0.12.0" }
-wgpu_context = { version = "0.7.0" }
+anyrender = { version = "0.12.0" }
+anyrender_serialize = { version = "0.6.0" }
+anyrender_skia = { version = "0.10.0" }
+anyrender_vello = { version = "0.13.0" }
+anyrender_vello_cpu = { version = "0.15.0" }
+anyrender_vello_hybrid = { version = "0.9.0" }
+anyrender_svg = { version = "0.13.0" }
+wgpu_context = { version = "0.8.0" }
 
 # Linebender + Fontations + WGPU + SVG
 color = "0.3"
@@ -143,7 +145,7 @@ http-cache-reqwest = { version = "=1.0.0-alpha.6", default-features = false }
 http-cache = { version = "=1.0.0-alpha.6", default-features = false }
 
 # Media & Decoding
-image = { version = "=0.25.6", default-features = false }
+image = { version = "0.25.6", default-features = false }
 wuff = "0.2"
 html-escape = "0.2.13"
 percent-encoding = "2.3.1"
@@ -165,7 +167,6 @@ console_error_panic_hook = "0.1"
 # Other dependencies
 rustc-hash = "2.1.2"
 bytes = "1.7.1"
-slab = "0.4.9"
 slotmap = "1.0.7"
 tracing = "0.1.40"
 tracing-subscriber = "0.3"

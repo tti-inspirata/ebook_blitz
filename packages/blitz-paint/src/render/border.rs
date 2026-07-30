@@ -552,7 +552,7 @@ impl ElementCx<'_, '_> {
         let grid_origin = table
             .cells
             .first()
-            .map(|cell| self.context.dom.as_ref().tree()[cell.node_id].final_layout.location)
+            .map(|cell| self.context.dom.as_ref().tree()[cell.node_id].final_layout().location)
             .map(|loc| (loc.x as f64, loc.y as f64))
             .unwrap_or((0.0, 0.0));
         let (outer_x, outer_y) = grid_origin;

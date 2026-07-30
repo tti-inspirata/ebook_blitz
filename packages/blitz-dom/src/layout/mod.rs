@@ -5,7 +5,7 @@
 //! This is slower, yes, but happens fast enough that it's not a huge issue.
 
 use crate::node::{ImageData, NodeData, SpecialElementData};
-use crate::{document::BaseDocument, node::Node};
+use crate::{document::BaseDocument, dom_node_id, node::Node, taffy_node_id};
 use markup5ever::local_name;
 use std::cell::Ref;
 use std::sync::Arc;
@@ -37,10 +37,10 @@ pub(crate) fn resolve_calc_value(calc_ptr: *const (), parent_size: f32) -> f32 {
 
 impl BaseDocument {
     fn node_from_id(&self, node_id: taffy::prelude::NodeId) -> &Node {
-        &self.nodes[node_id.into()]
+        &self.nodes[dom_node_id(node_id)]
     }
     fn node_from_id_mut(&mut self, node_id: taffy::prelude::NodeId) -> &mut Node {
-        &mut self.nodes[node_id.into()]
+        &mut self.nodes[dom_node_id(node_id)]
     }
 }
 
@@ -51,7 +51,7 @@ impl BaseDocument {
         inputs: taffy::tree::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::tree::LayoutOutput {
-        let node = &mut self.nodes[node_id.into()];
+        let node = &mut self.nodes[dom_node_id(node_id)];
 
         let font_styles = node.primary_styles().map(|style| {
             use style::values::computed::font::LineHeight;
@@ -74,7 +74,7 @@ impl BaseDocument {
                 // and should therefore never be measured individually.
                 #[cfg(feature = "tracing")]
                 tracing::error!(
-                    node_id = usize::from(node_id),
+                    node_id = ?dom_node_id(node_id),
                     data = ?data,
                     "Tried to lay out text node individually",
                 );
@@ -116,7 +116,7 @@ impl BaseDocument {
 
                     return compute_leaf_layout(
                         inputs,
-                        &node.style,
+                        node.style(),
                         resolve_calc_value,
                         |_known_size, _available_space| taffy::Size {
                             width: cols
@@ -131,20 +131,20 @@ impl BaseDocument {
                     match element_data.attr(local_name!("type")) {
                         // if the input type is hidden, hide it
                         Some("hidden") => {
-                            node.style.display = Display::None;
+                            node.style_mut().display = Display::None;
                             return taffy::LayoutOutput::HIDDEN;
                         }
                         Some("checkbox") => {
                             return compute_leaf_layout(
                                 inputs,
-                                &node.style,
+                                node.style(),
                                 resolve_calc_value,
                                 |_known_size, _available_space| {
-                                    let width = node.style.size.width.resolve_or_zero(
+                                    let width = node.style().size.width.resolve_or_zero(
                                         inputs.parent_size.width,
                                         resolve_calc_value,
                                     );
-                                    let height = node.style.size.height.resolve_or_zero(
+                                    let height = node.style().size.height.resolve_or_zero(
                                         inputs.parent_size.height,
                                         resolve_calc_value,
                                     );
@@ -159,7 +159,7 @@ impl BaseDocument {
                         None | Some("text" | "password" | "email" | "tel" | "url" | "search") => {
                             return compute_leaf_layout(
                                 inputs,
-                                &node.style,
+                                node.style(),
                                 resolve_calc_value,
                                 |_known_size, _available_space| taffy::Size {
                                     width: match inputs.available_space.width {
@@ -224,7 +224,7 @@ impl BaseDocument {
                         inputs.parent_size,
                         inputs.available_space,
                         &replaced_context,
-                        &node.style,
+                        node.style(),
                         false,
                     );
 
@@ -239,7 +239,7 @@ impl BaseDocument {
                 }
 
                 if node.flags.is_table_root() {
-                    let SpecialElementData::TableRoot(context) = &self.nodes[node_id.into()]
+                    let SpecialElementData::TableRoot(context) = &self.nodes[dom_node_id(node_id)]
                         .data
                         .downcast_element()
                         .unwrap()
@@ -263,18 +263,18 @@ impl BaseDocument {
                 }
 
                 if node.flags.is_inline_root() {
-                    return self.compute_inline_layout(usize::from(node_id), inputs, block_ctx);
+                    return self.compute_inline_layout(dom_node_id(node_id), inputs, block_ctx);
                 }
 
                 // The default CSS file will set
-                match node.style.display {
+                match node.style().display {
                     Display::Block => compute_block_layout(self, node_id, inputs, block_ctx),
                     Display::Flex => compute_flexbox_layout(self, node_id, inputs),
                     Display::Grid => compute_grid_layout(self, node_id, inputs),
                     Display::None => taffy::LayoutOutput::HIDDEN,
                 }
             }
-            NodeData::Document => compute_block_layout(self, node_id, inputs, None),
+            NodeData::Document(_) => compute_block_layout(self, node_id, inputs, None),
 
             _ => taffy::LayoutOutput::HIDDEN,
         }
@@ -301,7 +301,7 @@ impl TraversePartialTree for BaseDocument {
     }
 
     fn get_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
-        NodeId::from(
+        taffy_node_id(
             self.node_from_id(node_id)
                 .layout_children
                 .borrow()
@@ -321,11 +321,11 @@ impl LayoutPartialTree for BaseDocument {
     type CustomIdent = Atom;
 
     fn get_core_container_style(&self, node_id: NodeId) -> &Style<Atom> {
-        &self.node_from_id(node_id).style
+        self.node_from_id(node_id).style()
     }
 
     fn set_unrounded_layout(&mut self, node_id: NodeId, layout: &Layout) {
-        self.node_from_id_mut(node_id).unrounded_layout = *layout;
+        *self.node_from_id_mut(node_id).unrounded_layout_mut() = *layout;
     }
 
     fn resolve_calc_value(&self, calc_ptr: *const (), parent_size: f32) -> f32 {
@@ -351,7 +351,7 @@ impl taffy::CacheTree for BaseDocument {
         node_id: NodeId,
         inputs: &taffy::LayoutInput,
     ) -> Option<taffy::LayoutOutput> {
-        self.node_from_id(node_id).cache.get(inputs)
+        self.node_from_id(node_id).cache().get(inputs)
     }
 
     #[inline]
@@ -362,13 +362,13 @@ impl taffy::CacheTree for BaseDocument {
         layout_output: taffy::LayoutOutput,
     ) {
         self.node_from_id_mut(node_id)
-            .cache
+            .cache_mut()
             .store(inputs, layout_output);
     }
 
     #[inline]
     fn cache_clear(&mut self, node_id: NodeId) {
-        self.node_from_id_mut(node_id).cache.clear();
+        self.node_from_id_mut(node_id).cache_mut().clear();
     }
 }
 
@@ -446,26 +446,26 @@ impl taffy::LayoutGridContainer for BaseDocument {
 
 impl RoundTree for BaseDocument {
     fn get_unrounded_layout(&self, node_id: NodeId) -> Layout {
-        self.node_from_id(node_id).unrounded_layout
+        *self.node_from_id(node_id).unrounded_layout()
     }
 
     fn set_final_layout(&mut self, node_id: NodeId, layout: &Layout) {
-        self.node_from_id_mut(node_id).final_layout = *layout;
+        *self.node_from_id_mut(node_id).final_layout_mut() = *layout;
     }
 }
 
 impl PrintTree for BaseDocument {
     fn get_debug_label(&self, node_id: NodeId) -> &'static str {
         let node = &self.node_from_id(node_id);
-        let style = &node.style;
 
         match node.data {
-            NodeData::Document => "DOCUMENT",
+            NodeData::Document(_) => "DOCUMENT",
             // NodeData::Doctype { .. } => return "DOCTYPE",
             NodeData::Text { .. } => node.node_debug_str().leak(),
             NodeData::Comment => "COMMENT",
             NodeData::AnonymousBlock(_) => "ANONYMOUS BLOCK",
             NodeData::Element(_) => {
+                let style = node.style();
                 let display = match style.display {
                     Display::Flex => match style.flex_direction {
                         FlexDirection::Row | FlexDirection::RowReverse => "FLEX ROW",
@@ -481,7 +481,7 @@ impl PrintTree for BaseDocument {
     }
 
     fn get_final_layout(&self, node_id: NodeId) -> Layout {
-        self.node_from_id(node_id).final_layout
+        *self.node_from_id(node_id).final_layout()
     }
 }
 
@@ -494,11 +494,11 @@ impl PrintTree for BaseDocument {
 // }
 
 pub struct RefCellChildIter<'a> {
-    items: Ref<'a, [usize]>,
+    items: Ref<'a, [crate::NodeId]>,
     idx: usize,
 }
 impl<'a> RefCellChildIter<'a> {
-    fn new(items: Ref<'a, [usize]>) -> RefCellChildIter<'a> {
+    fn new(items: Ref<'a, [crate::NodeId]>) -> RefCellChildIter<'a> {
         RefCellChildIter { items, idx: 0 }
     }
 }
@@ -508,7 +508,7 @@ impl Iterator for RefCellChildIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         self.items.get(self.idx).map(|id| {
             self.idx += 1;
-            NodeId::from(*id)
+            taffy_node_id(*id)
         })
     }
 }

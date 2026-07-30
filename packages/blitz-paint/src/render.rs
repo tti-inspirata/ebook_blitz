@@ -21,7 +21,7 @@ use blitz_dom::node::{
     ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
     TextNodeData,
 };
-use blitz_dom::{BaseDocument, ElementData, Node, local_name};
+use blitz_dom::{BaseDocument, ElementData, Node, NodeId, local_name};
 use blitz_traits::devtools::DevtoolSettings;
 
 use style::values::computed::{BorderCornerRadius, ColorOrAuto};
@@ -53,7 +53,7 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) initial_x: f64,
     pub(crate) initial_y: f64,
     /// The id of the document's root element (cached to avoid re-resolving it for every element)
-    pub(crate) root_element_id: Option<usize>,
+    pub(crate) root_element_id: Option<NodeId>,
     /// Scrollbar hover/drag state, resolved once per scene like the root element
     #[cfg(feature = "scrollbars")]
     pub(crate) hovered_scrollbar: Option<blitz_dom::node::ScrollbarRef>,
@@ -61,7 +61,7 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) scrollbar_drag_target: Option<blitz_dom::node::ScrollbarRef>,
     pub(crate) layer_manager: LayerManager,
     /// Cached selection ranges for O(1) lookup: node_id -> (start_offset, end_offset)
-    pub(crate) selection_ranges: HashMap<usize, (usize, usize)>,
+    pub(crate) selection_ranges: HashMap<NodeId, (usize, usize)>,
 
     // Pre-computed `Scene`s for each CustomWidget
     pub(crate) custom_widget_scenes: &'a CustomWidgetSceneMap,
@@ -78,7 +78,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         initial_y: f64,
         custom_widget_scenes: &'a CustomWidgetSceneMap,
     ) -> Self {
-        let selection_ranges: HashMap<usize, (usize, usize)> = dom
+        let selection_ranges: HashMap<NodeId, (usize, usize)> = dom
             .get_text_selection_ranges()
             .into_iter()
             .map(|(node_id, start, end)| (node_id, (start, end)))
@@ -121,8 +121,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         let root_element = self.dom.as_ref().root_element();
         let root_id = root_element.id;
-        let bg_width = (self.width as f32).max(root_element.final_layout.size.width);
-        let bg_height = (self.height as f32).max(root_element.final_layout.size.height);
+        let bg_width = (self.width as f32).max(root_element.final_layout().size.width);
+        let bg_height = (self.height as f32).max(root_element.final_layout().size.height);
 
         let background_color = {
             let html_color = root_element
@@ -203,14 +203,14 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     fn render_element(
         &self,
         scene: &mut impl PaintScene,
-        node_id: usize,
+        node_id: NodeId,
         parent_style_transform: Affine,
         clip_rect: Rect,
     ) {
         let node = &self.dom.as_ref().tree()[node_id];
 
         // Early return if the element is hidden
-        if matches!(node.style.display, taffy::Display::None) {
+        if matches!(node.style().display, taffy::Display::None) {
             return;
         }
 
@@ -271,7 +271,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             padding,
             location,
             ..
-        } = node.final_layout;
+        } = *node.final_layout();
         let box_position = Vec2::new(location.x as f64, location.y as f64) * self.scale;
         let box_size = Size::new(size.width as f64, size.height as f64);
         let border_box = Rect::from_origin_size(box_position.to_point(), box_size);
@@ -286,10 +286,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         };
 
         // Don't render things that are out of view
-        let overflow = node.scrollable_overflow;
+        let overflow = *node.scrollable_overflow();
         let transform = parent_style_transform
             * Affine::translate(box_position)
-            * node.transform.unwrap_or_default();
+            * node.transform().unwrap_or_default();
 
         let screen_transform = Affine::translate(Vec2 {
             x: -self.initial_x,
@@ -310,7 +310,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         // Optimise zero-area (/very small area) clips by not rendering at all
         let clip_area = content_box_size.width * content_box_size.height;
-        let overflow_area = node.scrollable_overflow.width() * node.scrollable_overflow.height();
+        let overflow_area =
+            node.scrollable_overflow().width() * node.scrollable_overflow().height();
         if should_clip && clip_area < 0.01 && overflow_area < 0.01 {
             return;
         }
@@ -322,7 +323,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         // Apply CSS transform property (where transforms are 2d)
 
-        let mut cx = self.element_cx(node, node.final_layout, transform, custom_widget_scene);
+        let mut cx = self.element_cx(node, *node.final_layout(), transform, custom_widget_scene);
 
         // If this element clips its overflow it establishes a scrollport: narrow the clip
         // rectangle passed to descendants to the visible (clipped) region so that content
@@ -389,7 +390,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 // to that box makes the child disappear whenever opacity < 1.
                 // Both the layer shape and `scrollable_overflow` are consumed in
                 // the renderer's physical-pixel coordinate space at this point.
-                let overflow = node.scrollable_overflow;
+                let overflow = *node.scrollable_overflow();
                 effect_layer_clip = effect_layer_clip.union(overflow);
                 effect_layer_clip.x0 += filter_expansion_area.x0;
                 effect_layer_clip.y0 += filter_expansion_area.y0;
@@ -433,13 +434,13 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                             |scene| {
                                 // Now that background has been drawn, offset pos and cx in order to draw our contents scrolled
                                 let content_position = Point {
-                                    x: content_position.x - node.scroll_offset.x,
-                                    y: content_position.y - node.scroll_offset.y,
+                                    x: content_position.x - node.scroll_offset().x,
+                                    y: content_position.y - node.scroll_offset().y,
                                 };
 
                                 cx.transform = cx.transform.then_translate(Vec2 {
-                                    x: -node.scroll_offset.x * self.scale,
-                                    y: -node.scroll_offset.y * self.scale,
+                                    x: -node.scroll_offset().x * self.scale,
+                                    y: -node.scroll_offset().y * self.scale,
                                 });
                                 cx.draw_image(scene);
                                 #[cfg(feature = "svg")]
@@ -475,7 +476,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     fn render_node(
         &self,
         scene: &mut impl PaintScene,
-        node_id: usize,
+        node_id: NodeId,
         parent_style_transform: Affine,
         clip_rect: Rect,
     ) {
@@ -490,7 +491,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 // (they should always be rendered as part of an inline layout)
                 // unreachable!()
             }
-            NodeData::Document => {}
+            NodeData::Document(_) => {}
             // NodeData::Doctype => {}
             NodeData::Comment => {} // NodeData::ProcessingInstruction { .. } => {}
         }
@@ -504,7 +505,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         custom_widget_scene: Option<&'a Scene>,
     ) -> ElementCx<'dom, 'a> {
         let style = node
-            .stylo_element_data
+            .stylo_element_data()
             .primary_styles()
             .as_ref()
             .map(|styles| (*styles).clone())
@@ -1050,7 +1051,7 @@ impl ElementCx<'_, '_> {
             let shape = &self.frame.border_box;
             let stroke = Stroke::new(self.scale);
 
-            let stroke_color = match self.node.style.display {
+            let stroke_color = match self.node.style().display {
                 taffy::Display::Block => Color::new([1.0, 0.0, 0.0, 1.0]),
                 taffy::Display::Flex => Color::new([0.0, 1.0, 0.0, 1.0]),
                 taffy::Display::Grid => Color::new([0.0, 0.0, 1.0, 1.0]),

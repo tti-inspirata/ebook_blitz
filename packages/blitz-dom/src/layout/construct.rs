@@ -1,3 +1,4 @@
+use blitz_traits::node_id::NodeId;
 use core::str;
 use std::sync::Arc;
 
@@ -6,7 +7,6 @@ use parley::{
     FontContext, InlineBox, InlineBoxKind, LayoutContext, StyleProperty, TreeBuilder,
     WhiteSpaceCollapse,
 };
-use slab::Slab;
 use style::{
     computed_values::position::T as PositionProperty,
     data::ElementData as StyloElementData,
@@ -16,6 +16,7 @@ use style::{
         specified::box_::{DisplayInside, DisplayOutside},
     },
 };
+use thin_vec::ThinVec;
 
 use crate::{
     BaseDocument, ElementData, Node, NodeData,
@@ -34,12 +35,12 @@ const DUMMY_NAME: QualName = qual_name!("div", html);
 
 #[derive(Clone)]
 pub(crate) struct ConstructionTask {
-    pub(crate) node_id: usize,
+    pub(crate) node_id: NodeId,
     pub(crate) data: ConstructionTaskData,
 }
 
 pub(crate) struct ConstructionTaskResult {
-    pub(crate) node_id: usize,
+    pub(crate) node_id: NodeId,
     pub(crate) data: ConstructionTaskResultData,
 }
 
@@ -59,25 +60,30 @@ pub(crate) enum ConstructionTaskResultData {
 /// any) that wrapping children are being appended to.
 #[derive(Default)]
 pub(crate) struct LayoutChildren {
-    pub(crate) children: Vec<usize>,
-    pub(crate) anonymous_block_id: Option<usize>,
+    pub(crate) children: ThinVec<NodeId>,
+    pub(crate) anonymous_block_id: Option<NodeId>,
+    /// All anonymous blocks created while collecting these layout children.
+    ///
+    /// These are recorded on the container node so they can be deallocated the
+    /// next time it is reconstructed.
+    pub(crate) anonymous_blocks: ThinVec<NodeId>,
 }
 
 impl LayoutChildren {
     /// Append a single layout child.
-    fn push(&mut self, child_id: usize, doc: &mut BaseDocument) {
+    fn push(&mut self, child_id: NodeId, doc: &mut BaseDocument) {
         self.maybe_push_anon_block(doc);
         self.children.push(child_id);
     }
 
     /// Append all layout children in `slice`.
-    fn extend(&mut self, slice: &[usize], doc: &mut BaseDocument) {
+    fn extend(&mut self, slice: &[NodeId], doc: &mut BaseDocument) {
         self.maybe_push_anon_block(doc);
         self.children.extend_from_slice(slice);
     }
 
     fn maybe_push_anon_block(&mut self, doc: &mut BaseDocument) {
-        fn block_is_only_whitespace(doc: &BaseDocument, node_id: usize) -> bool {
+        fn block_is_only_whitespace(doc: &BaseDocument, node_id: NodeId) -> bool {
             for child_id in doc.nodes[node_id].children.iter().copied() {
                 let child = &doc.nodes[child_id];
                 if !child.is_whitespace_node() {
@@ -96,14 +102,20 @@ impl LayoutChildren {
                 if let Some(pos) = self.children.iter().rposition(|id| *id == anon_id) {
                     self.children.remove(pos);
                 }
-                doc.nodes.remove(anon_id);
+                self.anonymous_blocks.retain(|id| *id != anon_id);
+                doc.remove_node_from_tree(anon_id);
             }
         }
 
         self.anonymous_block_id = None;
     }
 
-    fn push_wrapped(&mut self, container_node_id: usize, child_id: usize, doc: &mut BaseDocument) {
+    fn push_wrapped(
+        &mut self,
+        container_node_id: NodeId,
+        child_id: NodeId,
+        doc: &mut BaseDocument,
+    ) {
         if self.anonymous_block_id.is_none() {
             self.create_anonymous_block(container_node_id, doc);
         }
@@ -112,7 +124,7 @@ impl LayoutChildren {
             .push(child_id);
     }
 
-    fn create_anonymous_block(&mut self, container_node_id: usize, doc: &mut BaseDocument) {
+    fn create_anonymous_block(&mut self, container_node_id: NodeId, doc: &mut BaseDocument) {
         use style::selector_parser::PseudoElement;
 
         const NAME: QualName = QualName {
@@ -120,7 +132,10 @@ impl LayoutChildren {
             ns: ns!(html),
             local: local_name!("div"),
         };
-        let node_id = doc.create_node(NodeData::AnonymousBlock(ElementData::new(NAME, Vec::new())));
+        let node_id = doc.create_node(NodeData::AnonymousBlock(Box::new(ElementData::new(
+            NAME,
+            Vec::new(),
+        ))));
 
         // Set style data
         let parent_style = doc.nodes[container_node_id].primary_styles().unwrap();
@@ -140,7 +155,9 @@ impl LayoutChildren {
         stylo_element_data.styles.primary = Some(style);
         stylo_element_data.set_restyled();
 
-        *doc.nodes[node_id].stylo_element_data.ensure_init_mut() = stylo_element_data;
+        *doc.nodes[node_id]
+            .stylo_element_data_mut()
+            .ensure_init_mut() = stylo_element_data;
 
         if doc.nodes[container_node_id]
             .flags
@@ -155,18 +172,19 @@ impl LayoutChildren {
 
         self.children.push(node_id);
         self.anonymous_block_id = Some(node_id);
+        self.anonymous_blocks.push(node_id);
     }
 }
 
-fn push_children_and_pseudos(layout_children: &mut Vec<usize>, node: &Node) {
-    if let Some(before) = node.before {
+fn push_children_and_pseudos(layout_children: &mut ThinVec<NodeId>, node: &Node) {
+    if let Some(before) = node.before() {
         layout_children.push(before);
     }
     layout_children.extend(node.children.iter().copied().filter(|child_id| {
         let child_node = node.with(*child_id);
         child_node.data.kind() != NodeKind::Comment
     }));
-    if let Some(after) = node.after {
+    if let Some(after) = node.after() {
         layout_children.push(after);
     }
 }
@@ -176,10 +194,10 @@ fn push_children_and_pseudos(layout_children: &mut Vec<usize>, node: &Node) {
 /// filtering out comments and whitespace.
 fn push_hoisted_children_and_pseudos(
     doc: &mut BaseDocument,
-    container_node_id: usize,
+    container_node_id: NodeId,
     out: &mut LayoutChildren,
 ) {
-    if let Some(before) = doc.nodes[container_node_id].before {
+    if let Some(before) = doc.nodes[container_node_id].before() {
         out.push(before, doc);
     }
     // Take children array from node to avoid borrow checker issues.
@@ -197,20 +215,20 @@ fn push_hoisted_children_and_pseudos(
         }
     }
     doc.nodes[container_node_id].children = children;
-    if let Some(after) = doc.nodes[container_node_id].after {
+    if let Some(after) = doc.nodes[container_node_id].after() {
         out.push(after, doc);
     }
 }
 
-fn push_non_whitespace_children_and_pseudos(layout_children: &mut Vec<usize>, node: &Node) {
-    if let Some(before) = node.before {
+fn push_non_whitespace_children_and_pseudos(layout_children: &mut ThinVec<NodeId>, node: &Node) {
+    if let Some(before) = node.before() {
         layout_children.push(before);
     }
     layout_children.extend(node.children.iter().copied().filter(|child_id| {
         let child_node = node.with(*child_id);
         !child_node.is_whitespace_node() && child_node.data.kind() != NodeKind::Comment
     }));
-    if let Some(after) = node.after {
+    if let Some(after) = node.after() {
         layout_children.push(after);
     }
 }
@@ -249,7 +267,7 @@ impl Default for FlowClassification {
 /// container's formatting context).
 fn classify_flow_children(
     doc: &BaseDocument,
-    children: &[usize],
+    children: &[NodeId],
     classification: &mut FlowClassification,
 ) {
     for child_id in children.iter().copied() {
@@ -317,7 +335,7 @@ fn classify_flow_children(
 
 pub(crate) fn collect_layout_children(
     doc: &mut BaseDocument,
-    container_node_id: usize,
+    container_node_id: NodeId,
     out: &mut LayoutChildren,
 ) {
     // Reset construction flags
@@ -366,7 +384,7 @@ pub(crate) fn collect_layout_children(
             }
 
             // Remove contruction damage from subtree
-            doc.iter_subtree_mut(container_node_id, |id: usize, doc: &mut BaseDocument| {
+            doc.iter_subtree_mut(container_node_id, |id: NodeId, doc: &mut BaseDocument| {
                 doc.nodes[id].remove_damage(CONSTRUCT_BOX | CONSTRUCT_DESCENDENT | CONSTRUCT_FC);
             });
 
@@ -382,7 +400,7 @@ pub(crate) fn collect_layout_children(
                 Err(err) => {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
-                        node_id = container_node_id,
+                        node_id = ?container_node_id,
                         html = outer_html,
                         error = ?err,
                         "SVG parse failed",
@@ -411,7 +429,7 @@ pub(crate) fn collect_layout_children(
     // Skip further construction if the node has no children or psuedo-children
     {
         let node = &doc.nodes[container_node_id];
-        if node.children.is_empty() && node.before.is_none() && node.after.is_none() {
+        if node.children.is_empty() && node.before().is_none() && node.after().is_none() {
             return;
         }
     }
@@ -543,11 +561,11 @@ pub(crate) fn collect_layout_children(
                 .downcast_element_mut()
                 .unwrap()
                 .special_data = data;
-            if let Some(before) = doc.nodes[container_node_id].before {
+            if let Some(before) = doc.nodes[container_node_id].before() {
                 out.push(before, doc);
             }
             out.extend(&tlayout_children, doc);
-            if let Some(after) = doc.nodes[container_node_id].after {
+            if let Some(after) = doc.nodes[container_node_id].after() {
                 out.push(after, doc);
             }
         }
@@ -579,15 +597,15 @@ fn pe_content_text(style: &style::properties::ComputedValues) -> Option<&str> {
     }
 }
 
-fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
+fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
     let (before_style, after_style, before_node_id, after_node_id) = {
         let node = &doc.nodes[node_id];
 
-        let before_node_id = node.before;
-        let after_node_id = node.after;
+        let before_node_id = node.before();
+        let after_node_id = node.after();
 
         // Note: yes these are kinda backwards
-        let style_data = node.stylo_element_data.get();
+        let style_data = node.stylo_element_data_opt().and_then(|s| s.get());
         let before_style = style_data
             .as_ref()
             .and_then(|d| d.styles.pseudos.as_array()[1].clone());
@@ -614,9 +632,8 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
 
         // Create pseudo element if it should exist but doesn't
         if let (None, Some(pe_style)) = (pe_node_id, &pe_style) {
-            let new_node_id = doc.create_node(NodeData::AnonymousBlock(ElementData::new(
-                DUMMY_NAME,
-                Vec::new(),
+            let new_node_id = doc.create_node(NodeData::AnonymousBlock(Box::new(
+                ElementData::new(DUMMY_NAME, Vec::new()),
             )));
             doc.nodes[new_node_id].parent = Some(node_id);
             doc.nodes[new_node_id].layout_parent.set(Some(node_id));
@@ -637,7 +654,9 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
             element_data.styles.primary = Some(pe_style.clone());
             element_data.set_restyled();
             element_data.damage = ALL_DAMAGE;
-            *doc.nodes[new_node_id].stylo_element_data.ensure_init_mut() = element_data;
+            *doc.nodes[new_node_id]
+                .stylo_element_data_mut()
+                .ensure_init_mut() = element_data;
 
             let node = &mut doc.nodes[node_id];
             node.set_pe_by_index(idx, Some(new_node_id));
@@ -677,13 +696,15 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
                     doc.nodes[pe_node_id]
                         .children
                         .retain(|&child_id| child_id != text_node_id);
-                    doc.nodes.try_remove(text_node_id);
+                    doc.remove_node_from_tree(text_node_id);
                     doc.nodes[node_id].insert_damage(ALL_DAMAGE);
                 }
                 (None, None) => {}
             }
 
-            let mut node_styles = doc.nodes[pe_node_id].stylo_element_data.get_mut();
+            let mut node_styles = doc.nodes[pe_node_id]
+                .stylo_element_data_opt_mut()
+                .and_then(|s| s.get_mut());
             let node_styles = &mut node_styles.as_mut().unwrap();
             node_styles.damage.insert(ALL_DAMAGE);
             let primary_styles = &mut node_styles.styles.primary;
@@ -699,7 +720,7 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
 /// Handles the cases where there are text nodes or inline nodes that need to be wrapped in an anonymous block node
 fn collect_complex_layout_children(
     doc: &mut BaseDocument,
-    container_node_id: usize,
+    container_node_id: NodeId,
     out: &mut LayoutChildren,
     hide_whitespace: bool,
     needs_wrap: impl Fn(NodeKind, DisplayOutside) -> bool,
@@ -748,7 +769,7 @@ fn collect_complex_layout_children(
     out.maybe_push_anon_block(doc);
 }
 
-fn create_text_editor(doc: &mut BaseDocument, input_element_id: usize, is_multiline: bool) {
+fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multiline: bool) {
     let node = &mut doc.nodes[input_element_id];
     let parley_style = node
         .primary_styles()
@@ -760,7 +781,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: usize, is_multil
     if !matches!(element.special_data, SpecialElementData::TextInput(_)) {
         let mut text_input_data = TextInputData::new(is_multiline);
         let editor = &mut text_input_data.editor;
-        editor.set_text(element.attr(local_name!("value")).unwrap_or(" "));
+        editor.set_text(element.attr(local_name!("value")).unwrap_or(""));
         element.special_data = SpecialElementData::TextInput(text_input_data);
     }
 
@@ -781,7 +802,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: usize, is_multil
     editor.refresh_layout(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx);
 }
 
-fn create_checkbox_input(doc: &mut BaseDocument, input_element_id: usize) {
+fn create_checkbox_input(doc: &mut BaseDocument, input_element_id: NodeId) {
     let node = &mut doc.nodes[input_element_id];
 
     let element = &mut node.data.downcast_element_mut().unwrap();
@@ -796,8 +817,8 @@ fn create_checkbox_input(doc: &mut BaseDocument, input_element_id: usize) {
 /// construction of the Parley layout (which invokes text shaping) to a paralell phase.
 pub(crate) fn find_inline_layout_embedded_boxes(
     doc: &mut BaseDocument,
-    inline_context_root_node_id: usize,
-    layout_children: &mut Vec<usize>,
+    inline_context_root_node_id: NodeId,
+    layout_children: &mut ThinVec<NodeId>,
 ) {
     flush_inline_pseudos_recursive(doc, inline_context_root_node_id);
 
@@ -810,7 +831,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
         );
     });
 
-    fn flush_inline_pseudos_recursive(doc: &mut BaseDocument, node_id: usize) {
+    fn flush_inline_pseudos_recursive(doc: &mut BaseDocument, node_id: NodeId) {
         doc.iter_children_mut(node_id, |child_id, doc| {
             flush_pseudo_elements(doc, child_id);
             let display = doc.nodes[node_id]
@@ -828,10 +849,10 @@ pub(crate) fn find_inline_layout_embedded_boxes(
     }
 
     fn find_inline_layout_embedded_boxes_recursive(
-        nodes: &mut Slab<Node>,
-        parent_id: usize,
-        node_id: usize,
-        layout_children: &mut Vec<usize>,
+        nodes: &mut crate::NodeTree,
+        parent_id: NodeId,
+        node_id: NodeId,
+        layout_children: &mut ThinVec<NodeId>,
     ) {
         let node = &mut nodes[node_id];
 
@@ -856,12 +877,12 @@ pub(crate) fn find_inline_layout_embedded_boxes(
                     .primary_styles()
                     .is_some_and(|style| style.clone_position().is_absolutely_positioned())
                 {
-                    let mut positioned_children = Vec::new();
-                    if let Some(before) = node.before {
+                    let mut positioned_children = ThinVec::new();
+                    if let Some(before) = node.before() {
                         positioned_children.push(before);
                     }
                     positioned_children.extend(node.children.iter().copied());
-                    if let Some(after) = node.after {
+                    if let Some(after) = node.after() {
                         positioned_children.push(after);
                     }
                     *node.layout_children.borrow_mut() = Some(positioned_children);
@@ -919,18 +940,18 @@ pub(crate) fn find_inline_layout_embedded_boxes(
             NodeData::Comment | NodeData::Text(_) => {
                 node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
-            NodeData::Document => unreachable!(),
+            NodeData::Document(_) => unreachable!(),
         }
     }
 }
 
 pub(crate) fn build_inline_layout_into(
-    nodes: &Slab<Node>,
+    nodes: &crate::NodeTree,
     layout_ctx: &mut LayoutContext<TextBrush>,
     font_ctx: &mut FontContext,
     text_layout: &mut TextLayout,
     scale: f32,
-    inline_context_root_node_id: usize,
+    inline_context_root_node_id: NodeId,
 ) {
     // Get the inline context's root node's text styles
     let root_node = &nodes[inline_context_root_node_id];
@@ -977,7 +998,7 @@ pub(crate) fn build_inline_layout_into(
         }
     };
 
-    if let Some(before_id) = root_node.before {
+    if let Some(before_id) = root_node.before() {
         build_inline_layout_recursive(
             &mut builder,
             nodes,
@@ -999,7 +1020,7 @@ pub(crate) fn build_inline_layout_into(
             root_line_height,
         );
     }
-    if let Some(after_id) = root_node.after {
+    if let Some(after_id) = root_node.after() {
         build_inline_layout_recursive(
             &mut builder,
             nodes,
@@ -1016,9 +1037,9 @@ pub(crate) fn build_inline_layout_into(
 
     fn build_inline_layout_recursive(
         builder: &mut TreeBuilder<TextBrush>,
-        nodes: &Slab<Node>,
-        parent_id: usize,
-        node_id: usize,
+        nodes: &crate::NodeTree,
+        parent_id: NodeId,
+        node_id: NodeId,
         collapse_mode: WhiteSpaceCollapse,
         parent_text_transform: TextTransform,
         root_line_height: f32,
@@ -1092,7 +1113,7 @@ pub(crate) fn build_inline_layout_into(
                             || *tag_name == local_name!("button")
                         {
                             builder.push_inline_box(InlineBox {
-                                id: node_id as u64,
+                                id: node_id.as_u64(),
                                 kind: box_kind,
                                 // Overridden by push_inline_box method
                                 index: 0,
@@ -1131,7 +1152,7 @@ pub(crate) fn build_inline_layout_into(
 
                             builder.push_style_span(style);
 
-                            if let Some(before_id) = node.before {
+                            if let Some(before_id) = node.before() {
                                 build_inline_layout_recursive(
                                     builder,
                                     nodes,
@@ -1154,7 +1175,7 @@ pub(crate) fn build_inline_layout_into(
                                     root_line_height,
                                 );
                             }
-                            if let Some(after_id) = node.after {
+                            if let Some(after_id) = node.after() {
                                 build_inline_layout_recursive(
                                     builder,
                                     nodes,
@@ -1172,7 +1193,7 @@ pub(crate) fn build_inline_layout_into(
                     // Inline box
                     (_, _) => {
                         builder.push_inline_box(InlineBox {
-                            id: node_id as u64,
+                            id: node_id.as_u64(),
                             kind: box_kind,
                             // Overridden by push_inline_box method
                             index: 0,
@@ -1203,7 +1224,7 @@ pub(crate) fn build_inline_layout_into(
             NodeData::Comment => {
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
-            NodeData::Document => unreachable!(),
+            NodeData::Document(_) => unreachable!(),
         }
     }
 }

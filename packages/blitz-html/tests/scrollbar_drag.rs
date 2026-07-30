@@ -1,6 +1,6 @@
 //! Dragging an overlay scrollbar thumb scrolls the container.
 
-use blitz_dom::{DocumentConfig, EventDriver, NoopEventHandler};
+use blitz_dom::{DocumentConfig, EventDriver, NodeId, NoopEventHandler};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, MouseEventButton, MouseEventButtons, Point, PointerCoords,
@@ -70,7 +70,7 @@ fn scroller_doc() -> HtmlDocument {
 /// Scrolls `scroller` down by `dy` content px through the scroll API, which
 /// also shows its overlay scrollbars (thumbs are only interactive while
 /// visible).
-fn scroll_down(doc: &mut HtmlDocument, scroller: usize, dy: f64) {
+fn scroll_down(doc: &mut HtmlDocument, scroller: NodeId, dy: f64) {
     doc.scroll_by(Some(scroller), 0.0, -dy, &mut |_| {});
 }
 
@@ -84,7 +84,7 @@ fn dragging_the_thumb_scrolls_the_container() {
     scroll_down(&mut doc, scroller, 450.0);
     drag(&mut doc, (97.0, 50.0), (97.0, 16.0));
 
-    let offset = doc.get_node(scroller).unwrap().scroll_offset.y;
+    let offset = doc.get_node(scroller).unwrap().scroll_offset().y;
     // -34 thumb px * (900 scroll range / 68 track play) = -450 content px
     assert!(
         offset.abs() < 1.0,
@@ -101,7 +101,7 @@ fn dragging_content_does_not_scroll() {
     scroll_down(&mut doc, scroller, 450.0);
     drag(&mut doc, (50.0, 50.0), (50.0, 16.0));
 
-    let offset = doc.get_node(scroller).unwrap().scroll_offset.y;
+    let offset = doc.get_node(scroller).unwrap().scroll_offset().y;
     assert_eq!(offset, 450.0, "content drags must not move the scrollbar");
 }
 
@@ -113,7 +113,7 @@ fn drag_clamps_at_the_end_of_the_track() {
     scroll_down(&mut doc, scroller, 450.0);
     drag(&mut doc, (97.0, 50.0), (97.0, 500.0));
 
-    let offset = doc.get_node(scroller).unwrap().scroll_offset.y;
+    let offset = doc.get_node(scroller).unwrap().scroll_offset().y;
     assert!(
         (offset - 900.0).abs() < 1.0,
         "expected scroll offset clamped to 900, got {offset}"
@@ -129,7 +129,7 @@ fn faded_out_thumb_does_not_capture_drags() {
     // thumb would be must fall through to the content.
     drag(&mut doc, (97.0, 8.0), (97.0, 42.0));
 
-    let offset = doc.get_node(scroller).unwrap().scroll_offset.y;
+    let offset = doc.get_node(scroller).unwrap().scroll_offset().y;
     assert_eq!(offset, 0.0, "hidden thumbs must not capture pointer events");
 }
 

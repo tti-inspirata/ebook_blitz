@@ -1,3 +1,4 @@
+use blitz_traits::node_id::NodeId;
 use std::{ops::Range, sync::Arc};
 
 use atomic_refcell::AtomicRefCell;
@@ -67,21 +68,21 @@ pub struct TableContext {
 #[derive(Debug, Clone)]
 pub struct TableCell {
     // kind: TableItemKind,
-    pub node_id: usize,
+    pub node_id: NodeId,
     style: taffy::Style<Atom>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TableRow {
     // kind: TableItemKind,
-    pub node_id: usize,
+    pub node_id: NodeId,
     pub height: f32,
 }
 
 pub(crate) fn build_table_context(
     doc: &mut BaseDocument,
-    table_root_node_id: usize,
-) -> (TableContext, Vec<usize>) {
+    table_root_node_id: NodeId,
+) -> (TableContext, Vec<NodeId>) {
     let mut cells: Vec<TableCell> = Vec::new();
     let mut rows: Vec<TableRow> = Vec::new();
     let mut row = 0u16;
@@ -138,10 +139,23 @@ pub(crate) fn build_table_context(
     style.grid_template_rows = vec![style_helpers::auto(); row as usize];
 
     style.gap = match border_collapse {
-        BorderCollapse::Separate => taffy::Size {
-            width: style_helpers::length(border_spacing.width.px()),
-            height: style_helpers::length(border_spacing.height.px()),
-        },
+        BorderCollapse::Separate => {
+            // In the separated borders model, `border-spacing` also applies between
+            // the table border and the outermost cells, in addition to between cells.
+            let spacing_x = border_spacing.width.px();
+            let spacing_y = border_spacing.height.px();
+            let padding = style.padding.resolve_or_zero(None, resolve_calc_value);
+            style.padding = taffy::Rect {
+                left: style_helpers::length(padding.left + spacing_x),
+                right: style_helpers::length(padding.right + spacing_x),
+                top: style_helpers::length(padding.top + spacing_y),
+                bottom: style_helpers::length(padding.bottom + spacing_y),
+            };
+            taffy::Size {
+                width: style_helpers::length(spacing_x),
+                height: style_helpers::length(spacing_y),
+            }
+        }
         BorderCollapse::Collapse => first_cell_border
             .as_ref()
             .map(|border| {
@@ -189,7 +203,7 @@ pub(crate) fn build_table_context(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_table_cells(
     doc: &mut BaseDocument,
-    node_id: usize,
+    node_id: NodeId,
     is_fixed: bool,
     border_collapse: BorderCollapse,
     row: &mut u16,
@@ -285,13 +299,18 @@ pub(crate) fn collect_table_cells(
                 *first_cell_border = Some(stylo_style.clone_border());
             }
 
-            // TODO: account for padding/border/margin
             if *row == 1 {
                 let column = match style.size.width.tag() {
                     taffy::CompactLength::LENGTH_TAG => {
                         let len = style.size.width.value();
                         let padding = style.padding.resolve_or_zero(None, resolve_calc_value);
-                        style_helpers::length(len + padding.left + padding.right)
+                        let border = style.border.resolve_or_zero(None, resolve_calc_value);
+                        match style.box_sizing {
+                            taffy::BoxSizing::ContentBox => style_helpers::length(
+                                len + padding.left + padding.right + border.left + border.right,
+                            ),
+                            taffy::BoxSizing::BorderBox => style_helpers::length(len),
+                        }
                     }
                     taffy::CompactLength::PERCENT_TAG => {
                         if is_fixed {
@@ -311,6 +330,9 @@ pub(crate) fn collect_table_cells(
             if border_collapse == BorderCollapse::Collapse {
                 style.border = taffy::Rect::ZERO.map(style_helpers::length);
             }
+
+            // The margin properties do not apply to table-internal elements
+            style.margin = taffy::Rect::ZERO.map(style_helpers::length);
 
             // Let Taffy auto-place the column. Combined with
             // `grid_auto_flow: RowDense` set on the table root, each cell
@@ -402,7 +424,7 @@ impl taffy::LayoutPartialTree for TableTreeWrapper<'_> {
     }
 
     fn set_unrounded_layout(&mut self, node_id: taffy::NodeId, layout: &taffy::Layout) {
-        let node_id = taffy::NodeId::from(self.ctx.cells[usize::from(node_id)].node_id);
+        let node_id = crate::taffy_node_id(self.ctx.cells[usize::from(node_id)].node_id);
         self.doc.set_unrounded_layout(node_id, layout)
     }
 
@@ -412,7 +434,7 @@ impl taffy::LayoutPartialTree for TableTreeWrapper<'_> {
         inputs: taffy::tree::LayoutInput,
     ) -> taffy::LayoutOutput {
         let cell = &self.ctx.cells[usize::from(node_id)];
-        let node_id = taffy::NodeId::from(cell.node_id);
+        let node_id = crate::taffy_node_id(cell.node_id);
         self.doc.compute_child_layout(node_id, inputs)
     }
 }

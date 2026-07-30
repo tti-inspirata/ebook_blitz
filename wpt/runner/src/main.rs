@@ -10,7 +10,7 @@ use blitz_traits::shell::{ColorScheme, Viewport};
 use panic_backtrace::StashedPanicInfo;
 use parley::FontContext;
 use report::{generate_expectations, generate_report};
-use supports_hyperlinks::supports_hyperlinks;
+use supports_hyperlinks::Stream as HyperlinkStream;
 use terminal_link::Link;
 use test_runners::{SubtestResult, process_test_file};
 use thread_local::ThreadLocal;
@@ -25,12 +25,13 @@ use owo_colors::OwoColorize;
 use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs::File;
-use std::io::{BufWriter, Write, stdout};
+use std::io::{BufWriter, IsTerminal, Write, stdout};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{self, Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
+use std::sync::LazyLock;
 use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, AtomicUsize};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs};
 
@@ -50,6 +51,17 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
+/// Whether to wrap test names in OSC 8 hyperlink escape sequences.
+///
+/// `supports_hyperlinks::supports_hyperlinks()` only sniffs environment variables, so it returns
+/// `true` even when stdout is redirected to a file or a pipe. That leaks half-written hyperlink
+/// sequences into captured output: if the consumer of that output truncates it (or dies mid-line,
+/// e.g. `| head`), the terminal never sees the closing `OSC 8 ; ; ST` and styles all subsequent
+/// output as a link. `supports_hyperlinks::on` additionally requires stdout to be a terminal
+/// (while still honouring the `FORCE_HYPERLINK` override).
+static USE_HYPERLINKS: LazyLock<bool> =
+    LazyLock::new(|| supports_hyperlinks::on(HyperlinkStream::Stdout));
+
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const SCALE: f64 = 1.0;
@@ -63,7 +75,7 @@ bitflags! {
         const USES_DIRECTION = 0b00001000;
         const USES_WRITING_MODE = 0b00010000;
         const USES_SUBGRID = 0b00100000;
-        const USES_MASONRY = 0b01000000;
+        const USES_GRID_LANES = 0b01000000;
         const USES_SCRIPT = 0b10000000;
     }
 }
@@ -224,6 +236,7 @@ impl Buffers {
     }
 }
 struct ThreadCtx {
+    worker_index: usize,
     viewport: Viewport,
     net_provider: Arc<WptNetProvider<Resource>>,
     navigation_provider: Arc<dyn NavigationProvider>,
@@ -240,7 +253,7 @@ struct ThreadCtx {
     direction_re: Regex,
     writing_mode_re: Regex,
     subgrid_re: Regex,
-    masonry_re: Regex,
+    grid_lanes_re: Regex,
     script_re: Regex,
     out_dir: PathBuf,
     wpt_dir: PathBuf,
@@ -260,7 +273,7 @@ struct TestResult {
 
 impl TestResult {
     fn print_to(&self, mut out: impl Write) {
-        let result_str = if supports_hyperlinks() {
+        let result_str = if *USE_HYPERLINKS {
             let url = format!("https://wpt.live/{}", self.name);
             let link = Link::new(&self.name, &url);
             format!(
@@ -324,7 +337,7 @@ impl TestResult {
             if self.flags.contains(TestFlags::USES_SUBGRID) {
                 write!(out, "{}", "S".bright_black()).unwrap();
             }
-            if self.flags.contains(TestFlags::USES_MASONRY) {
+            if self.flags.contains(TestFlags::USES_GRID_LANES) {
                 write!(out, "{}", "M".bright_black()).unwrap();
             }
             if self.kind == TestKind::Ref && self.flags.contains(TestFlags::USES_SCRIPT) {
@@ -360,6 +373,7 @@ fn main() {
     env_logger::init();
     std::panic::set_hook(Box::new(panic_backtrace::stash_panic_handler));
 
+    let verbose = env::args().any(|arg| arg == "--verbose" || arg == "-v");
     let wpt_dir = path::absolute(env::var("WPT_DIR").expect("WPT_DIR is not set")).unwrap();
     info!("WPT_DIR: {}", wpt_dir.display());
     if !wpt_dir.exists() {
@@ -388,7 +402,7 @@ fn main() {
 
     let fractional_pass_count = AtomicF64::new(0.0);
 
-    let masonry_fail_count = AtomicU32::new(0);
+    let grid_lanes_fail_count = AtomicU32::new(0);
     let subgrid_fail_count = AtomicU32::new(0);
     let writing_mode_fail_count = AtomicU32::new(0);
     let direction_fail_count = AtomicU32::new(0);
@@ -401,16 +415,28 @@ fn main() {
     let start_timestamp = unix_timestamp();
 
     let num = AtomicU32::new(0);
+    let completed_num = AtomicU32::new(0);
 
     let base_font_context = parley::FontContext::default();
 
     let thread_state: ThreadLocal<RefCell<ThreadCtx>> = ThreadLocal::new();
+    let worker_counter = AtomicUsize::new(0);
+    let stdout_is_terminal = stdout().is_terminal();
+
+    if !verbose && stdout_is_terminal {
+        let mut out = stdout().lock();
+        for _ in 0..rayon::current_num_threads() {
+            writeln!(out).unwrap();
+        }
+        out.flush().unwrap();
+    }
 
     let mut results: Vec<TestResult> = test_paths
         .into_par_iter()
         .map(|path| {
             let mut ctx = thread_state
                 .get_or(|| {
+                    let worker_index = worker_counter.fetch_add(1, Ordering::Relaxed);
                     let renderer = VelloImageRenderer::new(WIDTH, HEIGHT);
                     let font_ctx = base_font_context.clone();
                     let test_buffer = Vec::with_capacity((WIDTH * HEIGHT * 4) as usize);
@@ -433,7 +459,7 @@ fn main() {
                     let direction_re = Regex::new(r#"direction:|directionRTL"#).unwrap();
                     let writing_mode_re = Regex::new(r#"writing-mode:|vertical(RL|LR)"#).unwrap();
                     let subgrid_re = Regex::new(r#"subgrid"#).unwrap();
-                    let masonry_re = Regex::new(r#"masonry"#).unwrap();
+                    let grid_lanes_re = Regex::new(r#"grid-lanes"#).unwrap();
                     let script_re = Regex::new(r#"<script|onload="#).unwrap();
 
                     let attrtest_re =
@@ -444,6 +470,7 @@ fn main() {
                     let navigation_provider = Arc::new(DummyNavigationProvider);
 
                     RefCell::new(ThreadCtx {
+                        worker_index,
                         viewport,
                         net_provider,
                         renderer,
@@ -460,7 +487,7 @@ fn main() {
                         direction_re,
                         writing_mode_re,
                         subgrid_re,
-                        masonry_re,
+                        grid_lanes_re,
                         script_re,
                         out_dir: out_dir.clone(),
                         wpt_dir: wpt_dir.clone(),
@@ -507,8 +534,8 @@ fn main() {
             match status {
                 TestStatus::Pass => pass_count.fetch_add(1, Ordering::Relaxed),
                 TestStatus::Fail => {
-                    if flags.contains(TestFlags::USES_MASONRY) {
-                        masonry_fail_count.fetch_add(1, Ordering::Relaxed);
+                    if flags.contains(TestFlags::USES_GRID_LANES) {
+                        grid_lanes_fail_count.fetch_add(1, Ordering::Relaxed);
                     } else if flags.contains(TestFlags::USES_SUBGRID) {
                         subgrid_fail_count.fetch_add(1, Ordering::Relaxed);
                     } else if flags.contains(TestFlags::USES_WRITING_MODE) {
@@ -554,10 +581,30 @@ fn main() {
                 panic_info,
             };
 
-            // Print status line
-            let mut out = stdout().lock();
-            write!(out, "[{num}/{count}] ").unwrap();
-            result.print_to(out);
+            if verbose {
+                // Print status line
+                let mut out = stdout().lock();
+                write!(out, "[{num}/{count}] ").unwrap();
+                result.print_to(out);
+            } else {
+                let completed_num = completed_num.fetch_add(1, Ordering::Relaxed) + 1;
+                if stdout_is_terminal {
+                    let worker_index = ctx.worker_index;
+                    let worker_count = rayon::current_num_threads();
+                    let up = worker_count - worker_index;
+                    let mut out = stdout().lock();
+                    write!(
+                        out,
+                        "\x1b[?7l\x1b[{up}A\x1b[2K\r[{completed_num}/{count}] thread {worker_index:>2}: {} {}\x1b[{up}B\r\x1b[?7h",
+                        result.status.as_str(),
+                        result.name
+                    )
+                    .unwrap();
+                    out.flush().unwrap();
+                } else if completed_num.is_multiple_of(1000) || completed_num == count as u32 {
+                    println!("[{completed_num}/{count}] ...");
+                }
+            }
 
             result
         })
@@ -590,7 +637,7 @@ fn main() {
     let subtest_pass_count = subtest_pass_count.load(Ordering::SeqCst);
 
     let subgrid_fail_count = subgrid_fail_count.load(Ordering::SeqCst);
-    let masonry_fail_count = masonry_fail_count.load(Ordering::SeqCst);
+    let grid_lanes_fail_count = grid_lanes_fail_count.load(Ordering::SeqCst);
     let writing_mode_fail_count = writing_mode_fail_count.load(Ordering::SeqCst);
     let direction_fail_count = direction_fail_count.load(Ordering::SeqCst);
     let float_fail_count = float_fail_count.load(Ordering::SeqCst);
@@ -657,8 +704,8 @@ fn main() {
     if subgrid_fail_count > 0 {
         println!("{subgrid_fail_count:>4} use subgrid (S)");
     }
-    if masonry_fail_count > 0 {
-        println!("{masonry_fail_count:>4} use masonry (M)");
+    if grid_lanes_fail_count > 0 {
+        println!("{grid_lanes_fail_count:>4} use grid-lanes (M)");
     }
 
     // Generate wpt_expectations.txt

@@ -2,7 +2,7 @@
 //! child toggles the `open` attribute of its <details> ancestor, and the
 //! user-agent stylesheet hides everything except that summary while closed.
 
-use blitz_dom::{Document, DocumentConfig};
+use blitz_dom::{Document, DocumentConfig, NodeId};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_traits::{
     events::{
@@ -36,7 +36,7 @@ fn doc_scaled(html: &str, scale: f32) -> HtmlDocument {
     doc
 }
 
-fn node_id(doc: &HtmlDocument, selector: &str) -> usize {
+fn node_id(doc: &HtmlDocument, selector: &str) -> NodeId {
     doc.query_selector(selector).unwrap().expect(selector)
 }
 
@@ -77,7 +77,7 @@ fn is_open(doc: &HtmlDocument, selector: &str) -> bool {
 /// closed (the body is `display: none`), positive when open.
 fn body_height(doc: &HtmlDocument, selector: &str) -> f32 {
     let id = node_id(doc, selector);
-    doc.get_node(id).unwrap().final_layout.size.height
+    doc.get_node(id).unwrap().final_layout().size.height
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn summary_hit_area_matches_box_at_hidpi() {
 /// The text content of the given element's `::after` pseudo-element.
 fn after_text(doc: &HtmlDocument, selector: &str) -> Option<String> {
     let id = node_id(doc, selector);
-    let after_id = doc.get_node(id).unwrap().after?;
+    let after_id = doc.get_node(id).unwrap().after()?;
     let text_id = doc.get_node(after_id)?.children.first().copied()?;
     doc.get_node(text_id)?
         .text_data()
