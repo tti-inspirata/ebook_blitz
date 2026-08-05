@@ -26,7 +26,7 @@ pub(crate) mod list;
 pub(crate) mod replaced;
 pub(crate) mod table;
 
-use self::replaced::{ReplacedContext, replaced_measure_function};
+use self::replaced::{ReplacedContext, is_replaced_element, replaced_measure_function};
 use self::table::TableTreeWrapper;
 
 pub(crate) fn resolve_calc_value(calc_ptr: *const (), parent_size: f32) -> f32 {
@@ -175,15 +175,12 @@ impl BaseDocument {
                     }
                 }
 
-                if *element_data.name.local == *"img"
-                    || *element_data.name.local == *"canvas"
-                    || (cfg!(feature = "svg") && *element_data.name.local == *"svg")
-                {
+                if is_replaced_element(&element_data.name.local) {
                     // Get width and height attributes on image element
                     //
                     // TODO: smarter sizing using these (depending on object-fit, they shouldn't
                     // necessarily just override the native size)
-                    let attr_size = taffy::Size {
+                    let mut attr_size = taffy::Size {
                         width: element_data
                             .attr(local_name!("width"))
                             .and_then(|val| val.parse::<f32>().ok()),
@@ -192,31 +189,76 @@ impl BaseDocument {
                             .and_then(|val| val.parse::<f32>().ok()),
                     };
 
-                    // Get image's native sizespecial_data
-                    let inherent_size = match &element_data.special_data {
+                    // Get the element's intrinsic size and aspect ratio
+                    let (inherent_size, inherent_ratio) = match &element_data.special_data {
                         SpecialElementData::Image(image_data) => match &**image_data {
-                            ImageData::Raster(image) => taffy::Size {
-                                width: image.width as f32,
-                                height: image.height as f32,
-                            },
+                            ImageData::Raster(image) => {
+                                let size = taffy::Size {
+                                    width: image.width as f32,
+                                    height: image.height as f32,
+                                };
+                                (size, Some(size.width / size.height))
+                            }
                             #[cfg(feature = "svg")]
                             ImageData::Svg(svg) => {
-                                let size = svg.tree.size();
-                                taffy::Size {
-                                    width: size.width(),
-                                    height: size.height(),
+                                // For an inline `<svg>` element the width/height attributes are
+                                // presentation attributes: percentages resolve against the
+                                // containing block. For SVG loaded as an image the intrinsic
+                                // dimensions are context-free.
+                                if *element_data.name.local == local_name!("svg") {
+                                    attr_size = taffy::Size {
+                                        width: svg.resolved_width(inputs.parent_size.width),
+                                        height: svg.resolved_height(inputs.parent_size.height),
+                                    };
                                 }
+                                let (mut width, mut height) = svg.intrinsic_size();
+                                // A replaced element with only an intrinsic aspect ratio uses the
+                                // stretch-fit width in normal flow (CSS2 §10.3.2): fill the
+                                // definite available width and derive the height from the ratio.
+                                // Shrink-to-fit contexts (floats, abspos) keep the default object
+                                // size that `intrinsic_size` already applied.
+                                if svg.intrinsic_width().is_none()
+                                    && svg.intrinsic_height().is_none()
+                                {
+                                    if let (
+                                        Some(ratio),
+                                        AvailableSpace::Definite(available_width),
+                                    ) =
+                                        (svg.viewbox_aspect_ratio(), inputs.available_space.width)
+                                    {
+                                        width = available_width;
+                                        height = available_width / ratio;
+                                    }
+                                }
+                                (taffy::Size { width, height }, Some(svg.aspect_ratio()))
                             }
-                            ImageData::None => taffy::Size::ZERO,
+                            ImageData::None => (taffy::Size::ZERO, None),
                         },
-                        SpecialElementData::Canvas(_) => taffy::Size::ZERO,
-                        SpecialElementData::None => taffy::Size::ZERO,
+                        // Canvas has an intrinsic size and aspect ratio given by its
+                        // width/height attributes, defaulting to 300x150. Other replaced
+                        // elements without intrinsic dimensions (video, iframe, embed) use
+                        // the 300x150 default object size but have no intrinsic ratio.
+                        SpecialElementData::Canvas(_) | SpecialElementData::None => {
+                            let tag_name = &element_data.name.local;
+                            if *tag_name == local_name!("img") || *tag_name == local_name!("svg") {
+                                (taffy::Size::ZERO, None)
+                            } else {
+                                let size = taffy::Size {
+                                    width: attr_size.width.unwrap_or(300.0),
+                                    height: attr_size.height.unwrap_or(150.0),
+                                };
+                                let ratio = (*tag_name == local_name!("canvas"))
+                                    .then(|| size.width / size.height);
+                                (size, ratio)
+                            }
+                        }
                         _ => unreachable!(),
                     };
 
                     let replaced_context = ReplacedContext {
                         inherent_size,
                         attr_size,
+                        inherent_ratio,
                     };
 
                     let computed = replaced_measure_function(
@@ -225,7 +267,8 @@ impl BaseDocument {
                         inputs.available_space,
                         &replaced_context,
                         node.style(),
-                        false,
+                        inputs.sizing_mode,
+                        inputs.axis,
                     );
 
                     return taffy::LayoutOutput {
@@ -442,6 +485,17 @@ impl taffy::LayoutGridContainer for BaseDocument {
     fn get_grid_child_style(&self, child_node_id: NodeId) -> Self::GridItemStyle<'_> {
         self.get_core_container_style(child_node_id)
     }
+
+    fn set_detailed_grid_info(
+        &mut self,
+        node_id: NodeId,
+        detailed_grid_info: taffy::DetailedGridInfo,
+    ) {
+        let node = self.node_from_id_mut(node_id);
+        if let Some(element) = node.element_data_mut() {
+            element.detailed_grid_info = Some(Box::new(detailed_grid_info));
+        }
+    }
 }
 
 impl RoundTree for BaseDocument {
@@ -462,7 +516,7 @@ impl PrintTree for BaseDocument {
             NodeData::Document(_) => "DOCUMENT",
             // NodeData::Doctype { .. } => return "DOCTYPE",
             NodeData::Text { .. } => node.node_debug_str().leak(),
-            NodeData::Comment => "COMMENT",
+            NodeData::Comment { .. } => "COMMENT",
             NodeData::AnonymousBlock(_) => "ANONYMOUS BLOCK",
             NodeData::Element(_) => {
                 let style = node.style();

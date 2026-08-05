@@ -12,11 +12,13 @@ members = [
     "packages/stylo_taffy",
     "packages/dioxus-native",
     "packages/dioxus-native-dom",
+    "packages/blitz-test-harness",
     "apps/browser",
     "apps/browser/persistence",
     "apps/readme",
     "apps/bump",
     "wpt/runner",
+    "tests/blitz-tests",
     "examples/counter",
     "examples/transparent",
     "examples/seven_guis",
@@ -51,14 +53,15 @@ dioxus-native-dom = { version = "0.7.0", path = "./packages/dioxus-native-dom", 
 debug_timer = { version = "0.1.2", path = "./packages/debug_timer" }
 accesskit_xplat = { version = "0.1", path = "./packages/accesskit_xplat", default-features = false }
 browser-persistence = { path = "./apps/browser/persistence" }
+blitz-test-harness = { path = "./packages/blitz-test-harness" }
 
 # Servo dependencies
-style = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo" }
-style_traits = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo_traits" }
-style_atoms = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo_atoms" }
-style_config = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo_static_prefs" }
-style_dom = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "stylo_dom" }
-selectors = { git = "https://github.com/servo/stylo", rev = "2d289c14fdf46952d52cabce63b1f0dc55b2ccde", package = "selectors" }
+style = { version = "0.20.0", package = "stylo" }
+style_traits = { version = "0.20.0", package = "stylo_traits" }
+style_atoms = { version = "0.20.0", package = "stylo_atoms" }
+style_config = { version = "0.20.0", package = "stylo_static_prefs" }
+style_dom = { version = "0.20.0", package = "stylo_dom" }
+selectors = { version = "0.40.0", package = "selectors" }
 cssparser = { version = "0.37.0" }
 
 # HTML5ever dependencies
@@ -123,7 +126,7 @@ linebender_resource_handle = "0.1"
 peniko = "0.6.0"
 kurbo = "0.13.1"
 wgpu = "29"
-usvg = "0.46"
+usvg = "0.48.1"
 
 # Windowing & Input
 raw-window-handle = "0.6.0"
@@ -266,6 +269,13 @@ peniko = { workspace = true }
 color = { workspace = true }
 env_logger = "0.11"
 tracing-subscriber = "0.3"
+
+# TODO: remove these patches once `usvg` (with `Tree::intrinsic_dimensions`) and
+# `anyrender_svg` (with the usvg 0.48 bump) are released.
+[patch.crates-io]
+usvg = { git = "https://github.com/DioxusLabs/resvg", branch = "devin/1785858271-intrinsic-dimensions" }
+anyrender = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
+anyrender_svg = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
 
 # [patch.crates-io]
 # anyrender = { path = "../anyrender/crates/anyrender" }
