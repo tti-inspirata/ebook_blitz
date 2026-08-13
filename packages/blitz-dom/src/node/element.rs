@@ -28,6 +28,8 @@ use taffy::{
 use url::Url;
 
 use super::stylo_data::StyloData;
+#[cfg(feature = "svg")]
+use super::svg::SvgImageData;
 use super::{Attribute, Attributes};
 use crate::Document;
 use crate::layout::table::TableContext;
@@ -122,9 +124,12 @@ pub struct ElementData {
 /// The document node participates in layout and styling like an element, so it
 /// carries the same style/layout fields that were previously stored directly on
 /// [`Node`](super::Node).
-#[derive(Debug)]
 pub struct DocumentData {
     pub stylo_element_data: StyloData,
+    /// Selector flags deposited here by `apply_selector_flags` when a
+    /// `for_parent()` flag is applied while matching the root `<html>` element,
+    /// whose parent node is the document.
+    pub selector_flags: Cell<ElementSelectorFlags>,
     /// A clone of the document's shared style lock. Set when the owning
     /// [`Node`](super::Node) is constructed.
     pub guard: Option<SharedRwLock>,
@@ -142,10 +147,34 @@ pub struct DocumentData {
     pub transform: Option<Affine>,
 }
 
+// Hand-written like `ElementData`'s, because `ElementSelectorFlags` does not
+// implement `Debug`. Every other field is still reported.
+impl std::fmt::Debug for DocumentData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DocumentData")
+            .field("stylo_element_data", &self.stylo_element_data)
+            .field("guard", &self.guard)
+            .field("dirty_descendants", &self.dirty_descendants)
+            .field("element_state", &self.element_state)
+            .field("has_snapshot", &self.has_snapshot)
+            .field("snapshot_handled", &self.snapshot_handled)
+            .field("style", &self.style)
+            .field("display_constructed_as", &self.display_constructed_as)
+            .field("cache", &self.cache)
+            .field("unrounded_layout", &self.unrounded_layout)
+            .field("final_layout", &self.final_layout)
+            .field("scroll_offset", &self.scroll_offset)
+            .field("scrollable_overflow", &self.scrollable_overflow)
+            .field("transform", &self.transform)
+            .finish_non_exhaustive()
+    }
+}
+
 impl DocumentData {
     pub fn new() -> Self {
         Self {
             stylo_element_data: Default::default(),
+            selector_flags: Cell::new(ElementSelectorFlags::empty()),
             guard: None,
             dirty_descendants: AtomicBool::new(true),
             element_state: ElementState::empty(),
@@ -693,37 +722,6 @@ impl RasterImageData {
             height,
             data: Blob::new(data),
         }
-    }
-}
-
-/// A parsed SVG image together with its CSS intrinsic dimensions.
-///
-/// usvg always resolves the root `<svg>` to a concrete [`usvg::Tree::size`],
-/// falling back to the `viewBox` size when `width`/`height` are absent or given
-/// as percentages. For CSS sizing purposes, however, such an SVG has *no*
-/// intrinsic width/height (only an intrinsic aspect ratio). We record which
-/// dimensions were actually declared as absolute lengths so the paint layer can
-/// apply the CSS default sizing algorithm correctly.
-#[cfg(feature = "svg")]
-#[derive(Debug, Clone)]
-pub struct SvgImageData {
-    /// The parsed SVG tree.
-    pub tree: Arc<usvg::Tree>,
-    /// The intrinsic width in CSS px, present only when the root `<svg>`
-    /// declared an absolute (non-percentage) `width`.
-    pub intrinsic_width: Option<f32>,
-    /// The intrinsic height in CSS px, present only when the root `<svg>`
-    /// declared an absolute (non-percentage) `height`.
-    pub intrinsic_height: Option<f32>,
-}
-
-#[cfg(feature = "svg")]
-impl SvgImageData {
-    /// The intrinsic aspect ratio of the SVG (always available: usvg resolves
-    /// the `viewBox` or declared size into a non-zero [`usvg::Tree::size`]).
-    pub fn aspect_ratio(&self) -> f32 {
-        let size = self.tree.size();
-        size.width() / size.height()
     }
 }
 

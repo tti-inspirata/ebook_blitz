@@ -61,6 +61,8 @@ pub enum Resource {
     Svg(ImageType, crate::node::SvgImageData),
     Css(DocumentStyleSheet),
     Font(Bytes, FontFaceOverrides),
+    /// HTML fetched for an `<iframe>` element's `src`
+    DocumentSrc(String),
     None,
 }
 
@@ -452,7 +454,14 @@ pub(crate) fn fetch_font_face(
                         return None;
                     }
 
-                    let url = url_source.url.url().unwrap().as_ref().clone();
+                    // A relative url with no base url to resolve against
+                    // yields None; skip the source instead of panicking
+                    let Some(url) = url_source.url.url() else {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!("Skipping @font-face source with unresolvable url");
+                        return None;
+                    };
+                    let url = url.as_ref().clone();
                     Some((url, format))
                 });
 
@@ -492,6 +501,16 @@ fn stylo_to_fontique_style(style: &FontStyleRange) -> parley::fontique::FontStyl
                 Fq::Oblique(angle)
             }
         }
+    }
+}
+
+/// Handles HTML fetched for an `<iframe>` element's `src`
+pub(crate) struct DocumentSrcHandler;
+
+impl NetHandler for ResourceHandler<DocumentSrcHandler> {
+    fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
+        let html = String::from_utf8_lossy(&bytes).into_owned();
+        self.respond(resolved_url, Ok(Resource::DocumentSrc(html)));
     }
 }
 

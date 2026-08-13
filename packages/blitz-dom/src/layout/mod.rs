@@ -214,7 +214,9 @@ impl BaseDocument {
                         // width/height attributes, defaulting to 300x150. Other replaced
                         // elements without intrinsic dimensions (video, iframe, embed) use
                         // the 300x150 default object size but have no intrinsic ratio.
-                        SpecialElementData::Canvas(_) | SpecialElementData::None => {
+                        SpecialElementData::Canvas(_)
+                        | SpecialElementData::SubDocument(_)
+                        | SpecialElementData::None => {
                             let tag_name = &element_data.name.local;
                             if *tag_name == local_name!("img") || *tag_name == local_name!("svg") {
                                 (taffy::Size::ZERO, None)
@@ -288,6 +290,7 @@ impl BaseDocument {
                 // The default CSS file will set
                 match node.style().display {
                     Display::Block => compute_block_layout(self, node_id, inputs, block_ctx),
+                    Display::FlowRoot => compute_block_layout(self, node_id, inputs, None),
                     Display::Flex => compute_flexbox_layout(self, node_id, inputs),
                     Display::Grid => compute_grid_layout(self, node_id, inputs),
                     Display::None => taffy::LayoutOutput::HIDDEN,
@@ -503,6 +506,7 @@ impl PrintTree for BaseDocument {
                     },
                     Display::Grid => "GRID",
                     Display::Block => "BLOCK",
+                    Display::FlowRoot => "FLOW ROOT",
                     Display::None => "NONE",
                 };
                 format!("{} ({})", node.node_debug_str(), display).leak()

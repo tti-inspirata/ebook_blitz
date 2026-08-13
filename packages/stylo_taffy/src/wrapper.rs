@@ -164,6 +164,11 @@ impl<T: Deref<Target = ComputedValues>> taffy::BlockContainerStyle for TaffyStyl
     fn text_align(&self) -> taffy::TextAlign {
         convert::text_align(self.0.clone_text_align())
     }
+
+    #[inline]
+    fn align_content(&self) -> Option<taffy::AlignContent> {
+        convert::content_alignment(self.0.get_position().align_content, self.0.clone_display())
+    }
 }
 
 // BlockItemStyle impl
@@ -199,7 +204,7 @@ impl<T: Deref<Target = ComputedValues>> taffy::FlexboxContainerStyle for TaffySt
 
     #[inline]
     fn align_content(&self) -> Option<taffy::AlignContent> {
-        convert::content_alignment(self.0.get_position().align_content)
+        convert::content_alignment(self.0.get_position().align_content, self.0.clone_display())
     }
 
     #[inline]
@@ -209,7 +214,10 @@ impl<T: Deref<Target = ComputedValues>> taffy::FlexboxContainerStyle for TaffySt
 
     #[inline]
     fn justify_content(&self) -> Option<taffy::JustifyContent> {
-        convert::content_alignment(self.0.get_position().justify_content)
+        convert::content_alignment(
+            self.0.get_position().justify_content,
+            self.0.clone_display(),
+        )
     }
 }
 
@@ -435,6 +443,20 @@ impl<T: Deref<Target = ComputedValues>> taffy::GridContainerStyle for TaffyStylo
         }
     }
 
+    fn grid_template_area_row_count(&self) -> u16 {
+        match &self.0.get_position().grid_template_areas {
+            GridTemplateAreas::Areas(areas) => areas.0.strings.len() as u16,
+            GridTemplateAreas::None => 0,
+        }
+    }
+
+    fn grid_template_area_column_count(&self) -> u16 {
+        match &self.0.get_position().grid_template_areas {
+            GridTemplateAreas::Areas(areas) => areas.0.width as u16,
+            GridTemplateAreas::None => 0,
+        }
+    }
+
     fn grid_template_column_names(&self) -> Option<Self::TemplateLineNames<'_>> {
         match &self.0.get_position().grid_template_columns {
             stylo::GenericGridTemplateComponent::None => None,
@@ -475,12 +497,15 @@ impl<T: Deref<Target = ComputedValues>> taffy::GridContainerStyle for TaffyStylo
 
     #[inline]
     fn align_content(&self) -> Option<taffy::AlignContent> {
-        convert::content_alignment(self.0.get_position().align_content)
+        convert::content_alignment(self.0.get_position().align_content, self.0.clone_display())
     }
 
     #[inline]
     fn justify_content(&self) -> Option<taffy::JustifyContent> {
-        convert::content_alignment(self.0.get_position().justify_content)
+        convert::content_alignment(
+            self.0.get_position().justify_content,
+            self.0.clone_display(),
+        )
     }
 
     #[inline]

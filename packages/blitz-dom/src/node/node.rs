@@ -157,34 +157,6 @@ macro_rules! universal_accessors {
     };
 }
 
-/// Generates forwarding accessors for fields that only live on [`ElementData`]
-/// (element / anonymous block nodes).
-macro_rules! element_accessors {
-    ($($(#[$meta:meta])* $field:ident / $field_mut:ident : $ty:ty),* $(,)?) => {
-        impl Node {
-            $(
-                $(#[$meta])*
-                #[inline]
-                pub fn $field(&self) -> &$ty {
-                    match &self.data {
-                        NodeData::Element(data) | NodeData::AnonymousBlock(data) => &data.$field,
-                        _ => panic!(concat!("`", stringify!($field), "` is not available on this node kind")),
-                    }
-                }
-
-                $(#[$meta])*
-                #[inline]
-                pub fn $field_mut(&mut self) -> &mut $ty {
-                    match &mut self.data {
-                        NodeData::Element(data) | NodeData::AnonymousBlock(data) => &mut data.$field,
-                        _ => panic!(concat!("`", stringify!($field), "` is not available on this node kind")),
-                    }
-                }
-            )*
-        }
-    };
-}
-
 universal_accessors! {
     stylo_element_data / stylo_element_data_mut: StyloData,
     style / style_mut: Style<Atom>,
@@ -199,9 +171,9 @@ universal_accessors! {
     // carries these:
     element_state / element_state_mut: ElementState,
     snapshot_handled / snapshot_handled_mut: AtomicBool,
-}
-
-element_accessors! {
+    // `apply_selector_flags` deposits `for_parent()` flags on the parent node,
+    // and the parent of the root <html> element is the document -- so the
+    // document has to be able to hold selector flags too.
     selector_flags / selector_flags_mut: Cell<ElementSelectorFlags>,
 }
 
@@ -320,22 +292,21 @@ impl Node {
 
     pub fn set_transform(&mut self, scale: f32) -> Option<Affine> {
         let transform = self.primary_styles().and_then(|s| {
-            // Resolve the CSS transform in CSS pixels (unscaled reference box) so
-            // both percentage- and length-based translations come out in CSS px.
-            let w = self.final_layout().size.width;
-            let h = self.final_layout().size.height;
+            let size = self.final_layout().size;
             let reference_box = Rect::new(
                 Point2D::new(CSSPixelLength::new(0.0), CSSPixelLength::new(0.0)),
-                Size2D::new(CSSPixelLength::new(w), CSSPixelLength::new(h)),
+                Size2D::new(
+                    CSSPixelLength::new(size.width),
+                    CSSPixelLength::new(size.height),
+                ),
             );
-            let resolved = crate::resolve_2d_transform(s.get_box(), reference_box)?;
-            // The render/overflow tree operates in physical px (CSS px × scale).
-            // Re-express the transform in that space by conjugating with the scale
-            // factor: the linear part (scale/rotate/skew) is scale-invariant, only
-            // the translation must be multiplied by the scale.
-            let s = scale as f64;
-            let c = resolved.as_coeffs();
-            Some(Affine::new([c[0], c[1], c[2], c[3], c[4] * s, c[5] * s]))
+            // Resolve the transform in CSS pixels, then convert it to device-pixel space
+            // (S * T * S^-1): translation components are scaled, linear components are not.
+            crate::resolve_2d_transform(s.get_box(), reference_box).map(|t| {
+                let scale = scale as f64;
+                let [m11, m12, m21, m22, m41, m42] = t.as_coeffs();
+                Affine::new([m11, m12, m21, m22, m41 * scale, m42 * scale])
+            })
         });
 
         *self.transform_mut() = transform;
@@ -378,6 +349,14 @@ impl Node {
             Position::Static | Position::Relative | Position::Sticky
         );
         if !is_in_flow {
+            return false;
+        }
+        // Floated boxes do not break up the inline flow: they participate in the
+        // inline formatting context as out-of-flow inline boxes
+        let is_floating = style
+            .map(|s| s.clone_float().is_floating())
+            .unwrap_or(false);
+        if is_floating {
             return false;
         }
         let display = style
@@ -1377,6 +1356,58 @@ impl Node {
             .get()
             .map(|i| self.with(i).absolute_position(x, y))
             .unwrap_or(crate::util::Point { x, y })
+    }
+
+    /// Whether this node can act as an [`offset_parent`](Self::offset_parent): a positioned
+    /// element, or one of the elements that always qualify (`body`, `td`, `th`).
+    fn is_offset_parent(&self) -> bool {
+        let Some(styles) = self.primary_styles() else {
+            return false;
+        };
+        if styles.get_box().position != Position::Static {
+            return true;
+        }
+        self.data.is_element_with_tag_name(&local_name!("body"))
+            || self.data.is_element_with_tag_name(&local_name!("td"))
+            || self.data.is_element_with_tag_name(&local_name!("th"))
+    }
+
+    /// The nearest layout ancestor that [is an offset parent](Self::is_offset_parent), as in
+    /// CSSOM View's `offsetParent`.
+    pub fn offset_parent(&self) -> Option<&Node> {
+        let mut node = self;
+        loop {
+            node = self.with(node.layout_parent.get()?);
+            if node.is_offset_parent() {
+                return Some(node);
+            }
+        }
+    }
+
+    /// CSSOM View's `offsetLeft`/`offsetTop`: the offset of this node's border box from the
+    /// padding edge of its [`offset_parent`](Self::offset_parent).
+    pub fn offset_top_left(&self) -> crate::util::Point<f32> {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let mut current = self;
+        loop {
+            let layout = current.final_layout();
+            x += layout.location.x;
+            y += layout.location.y;
+
+            let Some(parent_id) = current.layout_parent.get() else {
+                break;
+            };
+            let parent = self.with(parent_id);
+            if parent.is_offset_parent() {
+                let border = parent.final_layout().border;
+                x -= border.left;
+                y -= border.top;
+                break;
+            }
+            current = parent;
+        }
+        crate::util::Point { x, y }
     }
 
     /// Creates a synthetic click event

@@ -119,7 +119,11 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // scene.reset();
         let viewport_scroll = self.dom.as_ref().viewport_scroll();
 
-        let root_element = self.dom.as_ref().root_element();
+        // A document without a root element (e.g. an empty iframe sub-document) has
+        // nothing to paint.
+        let Some(root_element) = self.dom.as_ref().try_root_element() else {
+            return;
+        };
         let root_id = root_element.id;
         let bg_width = (self.width as f32).max(root_element.final_layout().size.width);
         let bg_height = (self.height as f32).max(root_element.final_layout().size.height);
@@ -1070,7 +1074,9 @@ impl ElementCx<'_, '_> {
             let stroke = Stroke::new(self.scale);
 
             let stroke_color = match self.node.style().display {
-                taffy::Display::Block => Color::new([1.0, 0.0, 0.0, 1.0]),
+                taffy::Display::Block | taffy::Display::FlowRoot => {
+                    Color::new([1.0, 0.0, 0.0, 1.0])
+                }
                 taffy::Display::Flex => Color::new([0.0, 1.0, 0.0, 1.0]),
                 taffy::Display::Grid => Color::new([0.0, 0.0, 1.0, 1.0]),
                 taffy::Display::None => Color::new([0.0, 0.0, 1.0, 1.0]),

@@ -277,6 +277,9 @@ impl BaseDocument {
             available_space,
             sizing_mode: SizingMode::InherentSize,
             parent_size: available_space.into_options(),
+            // Atomic inlines (e.g. inline-block) establish independent formatting
+            // contexts: their margins never collapse with their children's margins.
+            vertical_margins_are_collapsible: taffy::Line::FALSE,
             ..inputs
         };
         #[cfg(feature = "floats")]
@@ -565,6 +568,7 @@ impl BaseDocument {
                             min_y,
                             direction,
                             clear,
+                            false,
                         );
 
                         let min_y = state.line_y() / scale as f64; //.max(pos.y as f64);
@@ -645,11 +649,8 @@ impl BaseDocument {
 
         #[cfg(feature = "floats")]
         {
-            let contains_floats = is_bfc_root;
-            if contains_floats {
-                height = height.max(
-                    (block_ctx.floated_content_height_contribution() + container_pb.top) * scale,
-                )
+            if is_bfc_root {
+                height = height.max(block_ctx.floated_content_height_contribution() * scale)
             };
         }
 
@@ -677,6 +678,8 @@ impl BaseDocument {
             ),
         }
         .maybe_max(container_pb.sum_axes().map(Some));
+
+        let container_direction = self.nodes[node_id].style().direction;
 
         // Store sizes and positions of inline boxes
         for line in inline_layout.layout.lines() {
@@ -754,9 +757,42 @@ impl BaseDocument {
                             .compute_child_layout(taffy::NodeId::from(ibox.id), child_inputs)
                             .size;
                         let node = &mut self.nodes[NodeId::from_u64(ibox.id)];
+
+                        // Resolve relative inset offsets against the containing block
+                        // (the content box of the inline container).
+                        let style = node.style();
+                        let container_content_size = final_size - content_box_inset.sum_axes();
+                        let inset = taffy::Rect {
+                            left: style
+                                .inset
+                                .left
+                                .maybe_resolve(container_content_size.width, resolve_calc_value),
+                            right: style
+                                .inset
+                                .right
+                                .maybe_resolve(container_content_size.width, resolve_calc_value),
+                            top: style
+                                .inset
+                                .top
+                                .maybe_resolve(container_content_size.height, resolve_calc_value),
+                            bottom: style
+                                .inset
+                                .bottom
+                                .maybe_resolve(container_content_size.height, resolve_calc_value),
+                        };
+                        let inset_offset = taffy::Point {
+                            x: if container_direction == Direction::Rtl {
+                                inset.right.map(|x| -x).or(inset.left).unwrap_or(0.0)
+                            } else {
+                                inset.left.or(inset.right.map(|x| -x)).unwrap_or(0.0)
+                            },
+                            y: inset.top.or(inset.bottom.map(|x| -x)).unwrap_or(0.0),
+                        };
+
                         let layout = node.unrounded_layout_mut();
                         layout.size = size;
-                        layout.location.x = (ibox.x / scale) + margin.left + container_pb.left;
+                        layout.location.x =
+                            (ibox.x / scale) + margin.left + container_pb.left + inset_offset.x;
                         // A zero-sized inline positioning container contributes no baseline box of
                         // its own. Its absolutely positioned descendants therefore use the
                         // adjacent text's real ink top as their static-position anchor, rather
@@ -770,8 +806,10 @@ impl BaseDocument {
                         // A negative `margin-top` shrinks the space the box reserves in the
                         // line but does not move the box itself, which stays anchored to the
                         // bottom of the reserved space.
-                        layout.location.y =
-                            (inline_box_y / scale) + margin.top.max(0.0) + container_pb.top;
+                        layout.location.y = (inline_box_y / scale)
+                            + margin.top.max(0.0)
+                            + container_pb.top
+                            + inset_offset.y;
                         layout.padding = padding; //.map(|p| p / scale);
                         layout.border = border; //.map(|p| p / scale);
                     }
