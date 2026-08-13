@@ -18,12 +18,13 @@ use crate::sizing::compute_object_fit;
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
 use anyrender::{PaintScene, Scene};
 use blitz_dom::node::{
-    ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
-    TextNodeData,
+    ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, SpecialElementData,
+    TextInputData, TextNodeData,
 };
 use blitz_dom::{BaseDocument, ElementData, Node, NodeId, local_name};
 use blitz_traits::devtools::DevtoolSettings;
 
+use style::computed_values::border_collapse::T as BorderCollapse;
 use style::values::computed::{BorderCornerRadius, ColorOrAuto};
 use style::{
     dom::TElement,
@@ -351,9 +352,26 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // rectangle passed to descendants to the visible (clipped) region so that content
         // scrolled out of view is culled rather than drawn and clipped away. The box used
         // here matches the clip applied to the content below.
+        // collapse 表格的 taffy border 是给合并边线预留的空间(见 layout::table),
+        // 单元格从 border-box 边界起铺满整个宽度,并不缩进这圈 border。按 padding-box
+        // 裁剪会把最右一列(和最后一行)的单元格背景削掉一个边框宽,和表级统一绘制的
+        // 网格线对不齐——表现为表头底色比它下面那条线窄。这类表格按 border-box 裁。
+        let is_collapsed_table = node
+            .element_data()
+            .map(|data| {
+                matches!(
+                    &data.special_data,
+                    SpecialElementData::TableRoot(table)
+                        if table.border_collapse == BorderCollapse::Collapse
+                )
+            })
+            .unwrap_or(false);
+
         let child_clip_rect = if should_clip {
             let clip_box = if is_text_input {
                 cx.frame.content_box_path()
+            } else if is_collapsed_table {
+                cx.frame.border_box_path()
             } else {
                 cx.frame.padding_box_path()
             };
@@ -440,6 +458,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                         // TODO: allow layers with opacity to be unclipped (overflow: visible)
                         let clip = if is_text_input {
                             &cx.frame.content_box_path()
+                        } else if is_collapsed_table {
+                            &cx.frame.border_box_path()
                         } else {
                             &cx.frame.padding_box_path()
                         };
