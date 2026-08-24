@@ -9,6 +9,10 @@ use style::values::generics::box_::{BaselineShift, BaselineShiftKeyword};
 use crate::color::{Color, ToColorColor as _};
 use crate::{FONT_EMBOLDEN_ENABLED, SELECTION_COLOR};
 
+/// Outline expansion applied per em when synthesising a bold face, matching the
+/// ~0.02 em stem growth browsers use for faux bold.
+const FAUX_BOLD_RATIO: f64 = 0.02;
+
 /// Draw the backgrounds of inline elements (e.g. `<span style="background: ...">`).
 ///
 /// Each glyph run carries the node id of the innermost inline element it belongs to
@@ -137,12 +141,20 @@ pub(crate) fn stroke_text<'a>(
                 let has_strikethrough =
                     text_decoration_line.contains(TextDecorationLine::LINE_THROUGH);
 
-                let embolden = if FONT_EMBOLDEN_ENABLED {
+                let mut embolden = if FONT_EMBOLDEN_ENABLED {
                     let fs = font_size as f64 / scale;
                     kurbo::Vec2::new((0.015125 * fs).min(0.3), (0.0121 * fs).min(0.3))
                 } else {
                     kurbo::Vec2::default()
                 };
+                // Faux bold: when the resolved family has no heavier face than the
+                // requested weight, `fontique` asks for synthetic emboldening. CJK
+                // families are usually shipped as a single weight, so without this
+                // `<b>`/`font-weight: bold` renders identical to body text.
+                if synthesis.embolden() {
+                    let fs = font_size as f64;
+                    embolden += kurbo::Vec2::new(FAUX_BOLD_RATIO * fs, FAUX_BOLD_RATIO * fs);
+                }
 
                 scene.draw_glyphs(
                     font,
