@@ -5,7 +5,7 @@
 
 use anyrender::render_to_buffer;
 use anyrender_vello_cpu::VelloCpuImageRenderer;
-use blitz_dom::DocumentConfig;
+use blitz_dom::{DocumentConfig, ScrollBehavior};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_paint::paint_scene;
 use blitz_traits::shell::{ColorScheme, Viewport};
@@ -31,9 +31,9 @@ fn pixel_in(html: &str, scroll: (f64, f64), x: usize, y: usize, scheme: ColorSch
     );
     doc.resolve(0.0);
     let scroller = doc.query_selector("#scroller").unwrap().expect("#scroller");
-    // Scroll through the scroll API (wheel-delta semantics: negated), so the
-    // scroll registers as scrollbar activity like a real user scroll.
-    doc.scroll_by(Some(scroller), -scroll.0, -scroll.1, &mut |_| {});
+    // Scroll through the scroll API, so the scroll registers as scrollbar activity like a real
+    // user scroll.
+    doc.scroll_by(scroller, scroll.0, scroll.1, ScrollBehavior::Instant);
     let buffer = render_to_buffer::<VelloCpuImageRenderer, _>(
         |scene| paint_scene(scene, &mut doc, 1.0, 100, 100, 0, 0),
         100,
@@ -123,7 +123,6 @@ fn horizontal_scroller_paints_a_thumb() {
 }
 
 #[test]
-#[ignore = "scrollbar-color is hardcoded to auto until stylo exposes it to the servo engine (servo/stylo#413)"]
 fn scrollbar_color_styles_the_thumb() {
     // Scrolled so the thumb is visible without hover.
     let px = pixel(
@@ -143,7 +142,6 @@ fn scrollbar_color_styles_the_thumb() {
 }
 
 #[test]
-#[ignore = "scrollbar-color is hardcoded to auto until stylo exposes it to the servo engine (servo/stylo#413)"]
 fn scrollbar_color_styles_the_track() {
     let px = pixel(
         r#"<html><body style="margin:0">
@@ -162,7 +160,6 @@ fn scrollbar_color_styles_the_track() {
 }
 
 #[test]
-#[ignore = "scrollbar-width is hardcoded to auto until stylo exposes it to the servo engine (servo/stylo#413)"]
 fn scrollbar_width_none_hides_the_scrollbar() {
     let px = pixel(
         r#"<html><body style="margin:0">
@@ -178,7 +175,6 @@ fn scrollbar_width_none_hides_the_scrollbar() {
 }
 
 #[test]
-#[ignore = "scrollbar-color is hardcoded to auto until stylo exposes it to the servo engine (servo/stylo#413)"]
 fn author_styled_scrollbar_still_hides_at_rest() {
     // scrollbar-color doesn't affect overlay visibility (matches how
     // Firefox/WebKit render the property).

@@ -1,6 +1,6 @@
 //! Dragging an overlay scrollbar thumb scrolls the container.
 
-use blitz_dom::{DocumentConfig, EventDriver, NodeId, NoopEventHandler};
+use blitz_dom::{DocumentConfig, EventDriver, NodeId, NoopEventHandler, ScrollBehavior};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, MouseEventButton, MouseEventButtons, Point, PointerCoords,
@@ -71,7 +71,7 @@ fn scroller_doc() -> HtmlDocument {
 /// also shows its overlay scrollbars (thumbs are only interactive while
 /// visible).
 fn scroll_down(doc: &mut HtmlDocument, scroller: NodeId, dy: f64) {
-    doc.scroll_by(Some(scroller), 0.0, -dy, &mut |_| {});
+    doc.scroll_by(scroller, 0.0, dy, ScrollBehavior::Instant);
 }
 
 #[test]
@@ -222,7 +222,6 @@ fn thumb_brightens_on_hover_and_drag() {
 }
 
 #[test]
-#[ignore = "scrollbar-color is hardcoded to auto until stylo exposes it to the servo engine (servo/stylo#413)"]
 fn white_author_thumb_still_signals_hover_and_drag() {
     // A near-white `scrollbar-color` thumb can't get lighter: hover/drag
     // feedback must blend towards the pole with contrast headroom (darken).

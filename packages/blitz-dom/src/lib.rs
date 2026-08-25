@@ -52,9 +52,12 @@ mod layout;
 mod mutator;
 mod query_selector;
 mod resolve;
+/// Scrolling of nodes and the viewport, and scroll animations.
+mod scrolling;
 mod selection;
 /// Implementations that interact with servo's style engine
 mod stylo;
+mod stylo_device;
 mod stylo_to_cursor_icon;
 mod stylo_to_kurbo;
 mod stylo_to_parley;
@@ -72,6 +75,7 @@ pub mod util;
 #[cfg(feature = "accessibility")]
 mod accessibility;
 
+pub use crate::layout::replaced::IntrinsicSizes;
 #[cfg(feature = "custom-widget")]
 pub use crate::node::Widget;
 
@@ -85,6 +89,7 @@ pub use markup5ever::{
 pub use mutator::DocumentMutator;
 pub use node::{Attribute, DocumentData, ElementData, Node, NodeData, TextNodeData};
 pub use parley::FontContext;
+pub use scrolling::{ScrollBehavior, ScrollLogicalPosition};
 pub use tree::NodeTree;
 
 /// Convert a Blitz [`NodeId`] into a [`taffy::NodeId`] (which wraps a `u64`).

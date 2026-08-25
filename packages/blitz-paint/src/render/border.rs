@@ -11,7 +11,7 @@ use style::{
 use crate::{
     color::{ToColorColor as _, contrast_ratio},
     kurbo_css::Edge,
-    render::ElementCx,
+    render::{ElementCx, PhysicalTracks},
 };
 
 /// A darker version of a colour (mirrors WebKit/Blink's `Color::Dark`): the
@@ -536,13 +536,12 @@ impl ElementCx<'_, '_> {
 
         let outer_border_style = self.style.get_border();
 
-        let cols = &grid_info.columns;
-        let rows = &grid_info.rows;
+        let cols = PhysicalTracks::from_tracks(&grid_info.columns);
+        let rows = PhysicalTracks::from_tracks(&grid_info.rows);
 
-        // 网格轨道之和即单元格区域的尺寸(轨道首尾的 gutter 为 0,内部 gutter 才是网格线)。
-        let inner_width = (cols.sizes.iter().sum::<f32>() + cols.gutters.iter().sum::<f32>()) as f64;
-        let inner_height =
-            (rows.sizes.iter().sum::<f32>() + rows.gutters.iter().sum::<f32>()) as f64;
+        // 首个轨道起点到末个轨道终点即单元格区域的尺寸(轨道之间的空隙才是网格线)。
+        let inner_width = cols.span() as f64;
+        let inner_height = rows.span() as f64;
 
         // collapse 模式下 layout::table 把表格的 taffy border 覆写成了单元格边框宽,
         // 用来容纳表格四周那圈合并边线。这圈空间在网格轨道之外,且上下/左右未必等宽
@@ -586,23 +585,44 @@ impl ElementCx<'_, '_> {
             None
         };
 
-        let n_cols = cols.sizes.len();
-        let n_rows = rows.sizes.len();
+        // taffy 的 detailed grid info 给出每个轨道的 start/end(已按物理序摆正),
+        // 相邻轨道之间的空隙就是内部网格线:线 k(1..n)位于轨道 k-1 与 k 之间。
+        // 下面的坐标一律相对网格原点(首个轨道起点),与 transform 的平移配套。
+        let col_pos: Vec<taffy::Line<f32>> = cols.iter().collect();
+        let row_pos: Vec<taffy::Line<f32>> = rows.iter().collect();
+        let col_origin = cols.origin();
+        let row_origin = rows.origin();
+        let n_cols = col_pos.len();
+        let n_rows = row_pos.len();
 
-        // Taffy 的轨道布局是 [gutter, track, gutter, track, ..., gutter],
-        // 即 gutters.len() == sizes.len() + 1:每条网格线对应一个 gutter,
-        // 首尾两条分别是表格的上/左与下/右边线。返回第 k 条线(0-based)的起始偏移。
-        let line_offsets = |sizes: &[f32], gutters: &[f32]| -> Vec<f64> {
-            let mut offsets = Vec::with_capacity(gutters.len());
-            let mut pos = 0.0f64;
-            for (k, &gutter) in gutters.iter().enumerate() {
-                offsets.push(pos);
-                pos += gutter as f64 + sizes.get(k).copied().unwrap_or(0.0) as f64;
-            }
-            offsets
+        // 水平线段在某一列上的横向范围:含两侧竖线的整宽,保证交叉点被填满。
+        let col_extent = |col: usize| -> (f64, f64) {
+            let x0 = if col == 0 {
+                0.0
+            } else {
+                (col_pos[col - 1].end - col_origin) as f64
+            };
+            let x1 = if col + 1 < n_cols {
+                (col_pos[col + 1].start - col_origin) as f64
+            } else {
+                inner_width
+            };
+            (x0, x1.min(inner_width))
         };
-        let col_lines = line_offsets(&cols.sizes, &cols.gutters);
-        let row_lines = line_offsets(&rows.sizes, &rows.gutters);
+        // 竖线段在某一行上的纵向范围(同上)。
+        let row_extent = |row: usize| -> (f64, f64) {
+            let y0 = if row == 0 {
+                0.0
+            } else {
+                (row_pos[row - 1].end - row_origin) as f64
+            };
+            let y1 = if row + 1 < n_rows {
+                (row_pos[row + 1].start - row_origin) as f64
+            } else {
+                inner_height
+            };
+            (y0, y1.min(inner_height))
+        };
 
         // 合并单元格(colspan/rowspan)的内部不应被网格线穿过。taffy 的 detailed grid
         // info 给出每个单元格占据的 1-indexed 网格线区间,据此标记要跳过的线段:
@@ -631,23 +651,19 @@ impl ElementCx<'_, '_> {
 
         // Draw horizontal borders
         if let Some(color) = h_inner.filter(|c| c.components[3] > 0.0) {
-            for (line, (&y, &gutter)) in row_lines.iter().zip(rows.gutters.iter()).enumerate() {
-                let (y0, y1) = (y, (y + gutter as f64).min(inner_height));
-                if gutter <= 0.0 || y0 >= inner_height {
+            for line in 1..n_rows {
+                let y0 = (row_pos[line - 1].end - row_origin) as f64;
+                let y1 = ((row_pos[line].start - row_origin) as f64).min(inner_height);
+                if y1 <= y0 || y0 >= inner_height {
                     continue;
                 }
-                // 逐列绘制线段(每段含两侧的竖 gutter,保证与竖线的交叉点填满),
+                // 逐列绘制线段(每段含两侧的竖线宽度,保证与竖线的交叉点填满),
                 // 跳过被 rowspan 单元格跨越的列。
                 for col in 0..n_cols {
                     if skip_h[line * n_cols.max(1) + col] {
                         continue;
                     }
-                    let x0 = col_lines[col];
-                    let x1 = col_lines
-                        .get(col + 1)
-                        .map(|&x| x + cols.gutters.get(col + 1).copied().unwrap_or(0.0) as f64)
-                        .unwrap_or(inner_width)
-                        .min(inner_width);
+                    let (x0, x1) = col_extent(col);
                     let shape = Rect::new(x0, y0, x1, y1).scale_from_origin(self.scale);
                     scene.fill(Fill::NonZero, transform, color, None, &shape);
                 }
@@ -656,21 +672,17 @@ impl ElementCx<'_, '_> {
 
         // Draw vertical borders
         if let Some(color) = v_inner.filter(|c| c.components[3] > 0.0) {
-            for (line, (&x, &gutter)) in col_lines.iter().zip(cols.gutters.iter()).enumerate() {
-                let (x0, x1) = (x, (x + gutter as f64).min(inner_width));
-                if gutter <= 0.0 || x0 >= inner_width {
+            for line in 1..n_cols {
+                let x0 = (col_pos[line - 1].end - col_origin) as f64;
+                let x1 = ((col_pos[line].start - col_origin) as f64).min(inner_width);
+                if x1 <= x0 || x0 >= inner_width {
                     continue;
                 }
                 for row in 0..n_rows {
                     if skip_v[line * n_rows.max(1) + row] {
                         continue;
                     }
-                    let y0 = row_lines[row];
-                    let y1 = row_lines
-                        .get(row + 1)
-                        .map(|&y| y + rows.gutters.get(row + 1).copied().unwrap_or(0.0) as f64)
-                        .unwrap_or(inner_height)
-                        .min(inner_height);
+                    let (y0, y1) = row_extent(row);
                     let shape = Rect::new(x0, y0, x1, y1).scale_from_origin(self.scale);
                     scene.fill(Fill::NonZero, transform, color, None, &shape);
                 }

@@ -22,7 +22,7 @@ use style::Atom;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::properties::ComputedValues;
 use style::properties::generated::longhands::position::computed_value::T as Position;
-use style::selector_parser::{PseudoElement, RestyleDamage};
+use style::selector_parser::RestyleDamage;
 use style::servo_arc::Arc as ServoArc;
 use style::shared_lock::SharedRwLock;
 use style::stylesheets::UrlExtraData;
@@ -211,6 +211,19 @@ impl Node {
                 Some(&data.dirty_descendants)
             }
             NodeData::Document(data) => Some(&data.dirty_descendants),
+            _ => None,
+        }
+    }
+
+    /// The `damaged_descendants` flag, if this node kind carries it (element or
+    /// document nodes). Returns `None` for text/comment nodes.
+    #[inline]
+    fn damaged_descendants_flag(&self) -> Option<&AtomicBool> {
+        match &self.data {
+            NodeData::Element(data) | NodeData::AnonymousBlock(data) => {
+                Some(&data.damaged_descendants)
+            }
+            NodeData::Document(data) => Some(&data.damaged_descendants),
             _ => None,
         }
     }
@@ -452,6 +465,45 @@ impl Node {
         }
     }
 
+    /// Returns whether this node or any of its descendants may carry damage.
+    pub fn has_damaged_descendants(&self) -> bool {
+        self.damaged_descendants_flag()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    }
+
+    /// Clears the damaged_descendants flag on this node.
+    pub fn unset_damaged_descendants(&self) {
+        if let Some(flag) = self.damaged_descendants_flag() {
+            flag.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Marks this node and all of its ancestors as (potentially) carrying
+    /// damage, so that the damage propagation pass visits this node's subtree.
+    ///
+    /// The invariant is: if a node carries damage (or needs damage-phase
+    /// processing such as pseudo-element style syncing), then it and all of
+    /// its ancestors have `damaged_descendants` set.
+    pub fn mark_damaged(&self) {
+        if let Some(flag) = self.damaged_descendants_flag() {
+            if flag.swap(true, Ordering::Relaxed) {
+                return;
+            }
+        }
+        let mut current_id = self.parent;
+        while let Some(parent_id) = current_id {
+            let parent = &self.tree()[parent_id];
+            // If this ancestor already has damaged_descendants set, we can stop
+            // because all further ancestors must also have it set
+            if let Some(flag) = parent.damaged_descendants_flag() {
+                if flag.swap(true, Ordering::Relaxed) {
+                    break;
+                }
+            }
+            current_id = parent.parent;
+        }
+    }
+
     // pub fn damage_mut(&mut self) -> Option<&mut RestyleDamage> {
     //     self.stylo_element_data
     //         .get_mut()
@@ -477,6 +529,9 @@ impl Node {
                 data.damage |= damage;
             }
         }
+        if !damage.is_empty() {
+            self.mark_damaged();
+        }
     }
 
     pub fn remove_damage(&mut self, damage: RestyleDamage) {
@@ -495,18 +550,23 @@ impl Node {
         }
     }
 
+    // State changes (hover/focus/active/disabled) do not set a restyle hint.
+    // Invalidation is driven by element snapshots: the style traversal diffs the
+    // snapshotted (pre-change) state against the current state and invalidates
+    // only the elements matched by selectors that depend on the changed state
+    // bits. Ancestors are marked dirty so the traversal reaches this node.
     pub fn hover(&mut self) {
         if let Some(data) = self.element_data_mut() {
             data.element_state.insert(ElementState::HOVER);
         }
-        self.set_restyle_hint(RestyleHint::restyle_subtree());
+        self.mark_ancestors_dirty();
     }
 
     pub fn unhover(&mut self) {
         if let Some(data) = self.element_data_mut() {
             data.element_state.remove(ElementState::HOVER);
         }
-        self.set_restyle_hint(RestyleHint::restyle_subtree());
+        self.mark_ancestors_dirty();
     }
 
     pub fn is_hovered(&self) -> bool {
@@ -519,7 +579,7 @@ impl Node {
             data.element_state
                 .insert(ElementState::FOCUS | ElementState::FOCUSRING);
         }
-        self.set_restyle_hint(RestyleHint::restyle_subtree());
+        self.mark_ancestors_dirty();
 
         // If focussing a text input, enable IME and set IME area
         if self
@@ -542,7 +602,7 @@ impl Node {
             data.element_state
                 .remove(ElementState::FOCUS | ElementState::FOCUSRING);
         }
-        self.set_restyle_hint(RestyleHint::restyle_subtree());
+        self.mark_ancestors_dirty();
 
         // If blurring a text input, disable IME
         if self
@@ -563,14 +623,14 @@ impl Node {
         if let Some(data) = self.element_data_mut() {
             data.element_state.insert(ElementState::ACTIVE);
         }
-        self.set_restyle_hint(RestyleHint::restyle_subtree());
+        self.mark_ancestors_dirty();
     }
 
     pub fn unactive(&mut self) {
         if let Some(data) = self.element_data_mut() {
             data.element_state.remove(ElementState::ACTIVE);
         }
-        self.set_restyle_hint(RestyleHint::restyle_subtree());
+        self.mark_ancestors_dirty();
     }
 
     pub fn is_active(&self) -> bool {
@@ -587,7 +647,7 @@ impl Node {
                 data.element_state.remove(ElementState::ENABLED);
             }
         }
-        self.set_restyle_hint(RestyleHint::restyle_subtree());
+        self.mark_ancestors_dirty();
     }
 
     // Marks the node as enabled if it can be.
@@ -599,7 +659,7 @@ impl Node {
                 data.element_state.remove(ElementState::DISABLED);
             }
         }
-        self.set_restyle_hint(RestyleHint::restyle_subtree());
+        self.mark_ancestors_dirty();
     }
 
     pub fn subdoc(&self) -> Option<&dyn Document> {
@@ -1056,13 +1116,10 @@ impl Node {
     }
 
     pub fn order(&self) -> i32 {
-        self.primary_styles()
-            .map(|s| match s.pseudo() {
-                Some(PseudoElement::Before) => i32::MIN,
-                Some(PseudoElement::After) => i32::MAX,
-                _ => s.clone_order(),
-            })
-            .unwrap_or(0)
+        // ::before/::after pseudos are flex/grid items and honor `order`.
+        // They sit first/last in layout_children, and the `order` sort is
+        // stable, so ties keep ::before first and ::after last.
+        self.primary_styles().map(|s| s.clone_order()).unwrap_or(0)
     }
 
     pub fn z_index(&self) -> i32 {
@@ -1164,11 +1221,11 @@ impl Node {
             || y < 0.0
             || y > size.height + self.scroll_offset().y as f32);
 
-        let content_size = self.final_layout().content_size;
+        let overflow_rect = self.final_layout().scrollable_overflow_rect;
         let matches_content = !(x < 0.0
-            || x > content_size.width + self.scroll_offset().x as f32
+            || x > overflow_rect.right + self.scroll_offset().x as f32
             || y < 0.0
-            || y > content_size.height + self.scroll_offset().y as f32);
+            || y > overflow_rect.bottom + self.scroll_offset().y as f32);
 
         let matches_hoisted_content = match &self.stacking_context {
             Some(sc) => {
@@ -1372,6 +1429,16 @@ impl Node {
             || self.data.is_element_with_tag_name(&local_name!("th"))
     }
 
+    /// Whether this node is a non-positioned `body` element. When such an element is the
+    /// `offsetParent`, `offsetLeft`/`offsetTop` are measured from the initial containing
+    /// block origin rather than from the `body`'s padding edge.
+    fn is_static_body(&self) -> bool {
+        self.data.is_element_with_tag_name(&local_name!("body"))
+            && self
+                .primary_styles()
+                .is_some_and(|styles| styles.get_box().position == Position::Static)
+    }
+
     /// The nearest layout ancestor that [is an offset parent](Self::is_offset_parent), as in
     /// CSSOM View's `offsetParent`.
     pub fn offset_parent(&self) -> Option<&Node> {
@@ -1399,7 +1466,7 @@ impl Node {
                 break;
             };
             let parent = self.with(parent_id);
-            if parent.is_offset_parent() {
+            if parent.is_offset_parent() && !parent.is_static_body() {
                 let border = parent.final_layout().border;
                 x -= border.left;
                 y -= border.top;
@@ -1408,6 +1475,48 @@ impl Node {
             current = parent;
         }
         crate::util::Point { x, y }
+    }
+
+    /// CSSOM View's `clientWidth`: the width of the padding box (border box minus
+    /// borders and scrollbar)
+    pub fn client_width(&self) -> f32 {
+        let layout = self.final_layout();
+        layout.size.width - layout.border.left - layout.border.right - layout.scrollbar_size.width
+    }
+
+    /// CSSOM View's `clientHeight`: the height of the padding box (border box minus
+    /// borders and scrollbar)
+    pub fn client_height(&self) -> f32 {
+        let layout = self.final_layout();
+        layout.size.height - layout.border.top - layout.border.bottom - layout.scrollbar_size.height
+    }
+
+    /// CSSOM View's `scrollWidth`: the width of the node's content, including
+    /// content not visible due to overflow
+    pub fn scroll_width(&self) -> f32 {
+        self.client_width()
+            .max(self.final_layout().scrollable_overflow_rect.right)
+    }
+
+    /// CSSOM View's `scrollHeight`: the height of the node's content, including
+    /// content not visible due to overflow
+    pub fn scroll_height(&self) -> f32 {
+        self.client_height()
+            .max(self.final_layout().scrollable_overflow_rect.bottom)
+    }
+
+    /// Does the node generate any boxes? (e.g. `getClientRects()` returns an empty
+    /// list for boxless nodes, such as `display: none`, `display: contents`, or
+    /// detached elements)
+    pub fn has_boxes(&self) -> bool {
+        self.flags.is_in_document()
+            && !self.display_style().is_some_and(|display| {
+                matches!(
+                    display.inside(),
+                    style::values::specified::box_::DisplayInside::None
+                        | style::values::specified::box_::DisplayInside::Contents
+                )
+            })
     }
 
     /// Creates a synthetic click event

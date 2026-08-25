@@ -48,11 +48,16 @@ impl BaseDocument {
         };
         damage |= damage_from_parent;
 
-        // Flush updated pseudo-element styles to their anonymous nodes so that
-        // style changes which don't trigger box construction still take effect.
-        //
-        // TODO: see if this can be made more efficient (/run less often)
-        self.sync_pseudo_element_styles(node_id);
+        // Skip subtrees which contain no damage. Anonymous nodes are never
+        // skipped themselves because damage marking walks the DOM parent
+        // chain, which bypasses anonymous boxes: a damaged node's flagged
+        // ancestors may reach it only through an unflagged anonymous wrapper.
+        {
+            let node = &self.nodes[node_id];
+            if damage.is_empty() && !node.has_damaged_descendants() && !node.is_anonymous() {
+                return RestyleDamage::empty();
+            }
+        }
 
         let damage_for_children = RestyleDamage::empty();
         let children = std::mem::take(&mut self.nodes[node_id].children);
@@ -126,61 +131,41 @@ impl BaseDocument {
         damage_for_parent
     }
 
-    /// Flush updated pseudo-element (`::before`/`::after`) styles from the owning
-    /// element's stylo data to the pseudo-element's anonymous node.
-    ///
-    /// Pseudo-element styles are normally flushed to the pseudo-element's node
-    /// during box construction (see `flush_pseudo_elements`), but in incremental
-    /// mode box construction only runs for nodes with construction damage.
-    /// Pseudo-element style changes which don't require reconstruction (e.g.
-    /// animations/transitions of repaint- or relayout-only properties) must still
-    /// be flushed to the pseudo-element's node - along with the damage they imply -
-    /// so that layout and paint see the new style.
-    fn sync_pseudo_element_styles(&mut self, node_id: NodeId) {
-        let node = &self.nodes[node_id];
-
-        let before_node_id = node.before();
-        let after_node_id = node.after();
-        if before_node_id.is_none() && after_node_id.is_none() {
-            return;
-        }
-
-        let (before_style, after_style) = {
-            let style_data = node.stylo_element_data_opt().and_then(|s| s.get());
-            let Some(style_data) = style_data.as_ref() else {
-                return;
-            };
-            // Note: yes these are kinda backwards (see `flush_pseudo_elements`)
-            let pseudos = style_data.styles.pseudos.as_array();
-            (pseudos[1].clone(), pseudos[0].clone())
-        };
-
-        // Creation and removal of pseudo-elements is handled during box construction
-        // (Stylo generates construction damage for those cases), so only the case
-        // where the pseudo-element both was and remains present is handled here.
-        for (pe_node_id, pe_style) in [(before_node_id, before_style), (after_node_id, after_style)]
+    /// Clear damage and the `damaged_descendants`/`dirty_descendants` flags
+    /// on all nodes which may carry them, using the `damaged_descendants`
+    /// flags to skip clean subtrees (mirroring `propagate_damage_flags`).
+    pub(crate) fn clear_damage_and_dirty_flags(&mut self, node_id: NodeId) {
         {
-            let (Some(pe_node_id), Some(pe_style)) = (pe_node_id, pe_style) else {
-                continue;
-            };
-            let mut pe_data = self.nodes[pe_node_id]
-                .stylo_element_data_opt_mut()
-                .and_then(|s| s.get_mut());
-            let Some(pe_data) = pe_data.as_mut() else {
-                continue;
-            };
-            let Some(old_style) = pe_data.styles.primary.clone() else {
-                continue;
-            };
-            if std::ptr::eq(&*old_style, &*pe_style) {
-                continue;
+            let node = &self.nodes[node_id];
+            let has_damage = node.damage().is_some_and(|d| !d.is_empty());
+            if !has_damage && !node.has_damaged_descendants() && !node.is_anonymous() {
+                return;
             }
-
-            let diff = RestyleDamage::compute_style_difference::<&Node>(&old_style, &pe_style);
-            pe_data.damage.insert(diff.damage);
-            pe_data.styles.primary = Some(pe_style);
-            pe_data.set_restyled();
         }
+
+        let children = std::mem::take(&mut self.nodes[node_id].children);
+        let layout_children = std::mem::take(self.nodes[node_id].layout_children.get_mut());
+        for child in children.iter() {
+            self.clear_damage_and_dirty_flags(*child);
+        }
+        if let Some(layout_children) = layout_children.as_ref() {
+            for child in layout_children.iter() {
+                self.clear_damage_and_dirty_flags(*child);
+            }
+        }
+        if let Some(before_id) = self.nodes[node_id].before() {
+            self.clear_damage_and_dirty_flags(before_id);
+        }
+        if let Some(after_id) = self.nodes[node_id].after() {
+            self.clear_damage_and_dirty_flags(after_id);
+        }
+
+        let node = &mut self.nodes[node_id];
+        node.children = children;
+        *node.layout_children.get_mut() = layout_children;
+        node.clear_damage_mut();
+        node.unset_damaged_descendants();
+        node.unset_dirty_descendants();
     }
 }
 
@@ -219,6 +204,7 @@ pub(crate) fn compute_layout_damage(old: &ComputedValues, new: &ComputedValues) 
         if old_box.display != new_box.display
             || old_box.float != new_box.float
             || old_box.position != new_box.position
+            || old_box.contain != new_box.contain
             || old.clone_visibility() != new.clone_visibility()
         {
             return true;
@@ -436,6 +422,23 @@ impl BaseDocument {
         self.flush_styles_to_layout_impl(node_id, None);
     }
 
+    /// Flush the image layers of nodes whose style changed during the last
+    /// style traversal (or whose pseudo-element boxes were (re)constructed).
+    pub(crate) fn flush_pending_style_images(&mut self) {
+        let mut pending = std::mem::take(&mut self.pending_style_image_nodes);
+        pending.sort_unstable();
+        pending.dedup();
+        for node_id in pending {
+            // Anonymous boxes (including pseudo-elements) can be removed from
+            // the slab between queueing and flushing; skip stale IDs.
+            if !self.nodes.contains_key(node_id) {
+                continue;
+            }
+            self.flush_image_layers_from_style(node_id, ImageLayerKind::Background);
+            self.flush_image_layers_from_style(node_id, ImageLayerKind::Mask);
+        }
+    }
+
     /// Flush a CSS image layer list (`background-image` or `mask-image`) from style
     /// to dedicated storage on the node, fetching any images which are not yet loaded.
     fn flush_image_layers_from_style(&mut self, node_id: NodeId, kind: ImageLayerKind) {
@@ -476,7 +479,7 @@ impl BaseDocument {
                     let old_image = elem_images[idx].as_ref();
                     let old_image_url = old_image.map(|data| &data.url);
                     if old_image_url.is_some_and(|old_url| **new_url == **old_url) {
-                        break;
+                        continue;
                     }
 
                     // Check cache first
@@ -536,10 +539,6 @@ impl BaseDocument {
     ) {
         let mut new_stacking_context: HoistedPaintChildren = HoistedPaintChildren::new();
         let stacking_context = &mut new_stacking_context;
-
-        // Flush background/mask images from style to dedicated storage on the node
-        self.flush_image_layers_from_style(node_id, ImageLayerKind::Background);
-        self.flush_image_layers_from_style(node_id, ImageLayerKind::Mask);
 
         let incremental = self.incremental_layout;
         let display = {

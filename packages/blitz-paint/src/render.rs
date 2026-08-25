@@ -5,6 +5,7 @@ mod clip_path;
 mod form_controls;
 mod mask;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use crate::filters::convert_filters;
 use crate::kurbo_css::NonUniformRoundedRectRadii;
 use crate::layers::LayerManager;
 use crate::sizing::compute_object_fit;
+use crate::text::DrawTextContext;
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
 use anyrender::{PaintScene, Scene};
 use blitz_dom::node::{
@@ -33,7 +35,8 @@ use style::{
         style_structs::Font,
     },
     values::{
-        computed::{CSSPixelLength, Overflow},
+        computed::{CSSPixelLength, Contain, Overflow},
+        specified::box_::{DisplayInside, DisplayOutside},
         specified::image::ImageRendering,
     },
 };
@@ -42,6 +45,62 @@ use kurbo::{self, Affine, Insets, Point, Rect, Shape, Size, Stroke, Vec2};
 use peniko::{self, Fill, ImageData, ImageSampler};
 use style::values::generics::color::GenericColor;
 use taffy::Layout;
+
+/// A view of the track positions reported by taffy in physical (left-to-right /
+/// top-to-bottom) order. Taffy reports tracks in logical order, which for RTL grid
+/// containers is physically reversed.
+#[derive(Clone, Copy)]
+pub(crate) struct PhysicalTracks<'a> {
+    positions: &'a [taffy::Line<f32>],
+    reversed: bool,
+}
+
+impl<'a> PhysicalTracks<'a> {
+    pub(crate) fn from_tracks<S: taffy::CheapCloneStr>(
+        tracks: &'a taffy::DetailedGridTracksInfo<S>,
+    ) -> Self {
+        let positions = tracks.positions.as_slice();
+        let reversed = positions
+            .first()
+            .zip(positions.last())
+            .is_some_and(|(first, last)| first.start > last.start);
+        Self {
+            positions,
+            reversed,
+        }
+    }
+
+    fn get(self, index: usize) -> taffy::Line<f32> {
+        if self.reversed {
+            self.positions[self.positions.len() - 1 - index]
+        } else {
+            self.positions[index]
+        }
+    }
+
+    /// Iterate track positions in physical order
+    pub(crate) fn iter(self) -> impl ExactSizeIterator<Item = taffy::Line<f32>> + 'a {
+        (0..self.positions.len()).map(move |index| self.get(index))
+    }
+
+    /// The physical start position of the first track
+    pub(crate) fn origin(self) -> f32 {
+        if self.positions.is_empty() {
+            0.0
+        } else {
+            self.get(0).start
+        }
+    }
+
+    /// Total distance from the start of the first track to the end of the last track
+    pub(crate) fn span(self) -> f32 {
+        if self.positions.is_empty() {
+            0.0
+        } else {
+            self.get(self.positions.len() - 1).end - self.get(0).start
+        }
+    }
+}
 
 /// A short-lived struct which holds a bunch of parameters for rendering a scene so
 /// that we don't have to pass them down as parameters
@@ -61,6 +120,8 @@ pub struct BlitzDomPainter<'dom, 'a> {
     #[cfg(feature = "scrollbars")]
     pub(crate) scrollbar_drag_target: Option<blitz_dom::node::ScrollbarRef>,
     pub(crate) layer_manager: LayerManager,
+    /// Reusable scratch allocations shared by all text layouts painted for this document.
+    pub(crate) draw_text_context: RefCell<DrawTextContext>,
     /// Cached selection ranges for O(1) lookup: node_id -> (start_offset, end_offset)
     pub(crate) selection_ranges: HashMap<NodeId, (usize, usize)>,
 
@@ -101,6 +162,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             #[cfg(feature = "scrollbars")]
             scrollbar_drag_target: dom.scrollbar_drag_target(),
             layer_manager,
+            draw_text_context: RefCell::new(DrawTextContext::default()),
             selection_ranges,
             custom_widget_scenes,
         }
@@ -160,7 +222,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         if let Some(bg_color) = background_color {
             let bg_color = bg_color.as_srgb_color();
             let rect = Rect::from_origin_size(
-                (self.initial_x * self.scale, self.initial_y * self.scale),
+                (self.initial_x, self.initial_y),
                 (bg_width as f64, bg_height as f64),
             );
             scene.fill(Fill::NonZero, Affine::IDENTITY, bg_color, None, &rect);
@@ -263,6 +325,16 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // TODO: account for overflow_x vs overflow_y
         let overflow_x = styles.get_box().overflow_x;
         let overflow_y = styles.get_box().overflow_y;
+        // `contain: paint` (and stronger values like `strict`/`content`) clips the element's
+        // contents to its padding box. Paint containment does not apply to non-atomic inlines
+        // or internal table boxes other than table-cell.
+        let contain_paint = styles.get_box().clone_contain().contains(Contain::PAINT) && {
+            let display = styles.clone_display();
+            let is_internal_table_box_other_than_cell = display.outside()
+                == DisplayOutside::InternalTable
+                && display.inside() != DisplayInside::TableCell;
+            !display.is_inline_flow() && !is_internal_table_box_other_than_cell
+        };
         // 注意:用 image_data() 而非 raster_image_data(),否则 SVG <img> 不会进入
         // 裁剪层,border-radius 圆角对 SVG 图片失效(画成方角)。
         let is_image = node
@@ -284,6 +356,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             && (is_image
                 || is_sub_doc
                 || is_text_input
+                || contain_paint
                 || !matches!(overflow_x, Overflow::Visible)
                 || !matches!(overflow_y, Overflow::Visible));
 
@@ -551,9 +624,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             .primary_styles()
             .as_ref()
             .map(|styles| (*styles).clone())
-            .unwrap_or(
-                ComputedValues::initial_values_with_font_override(Font::initial_values()).to_arc(),
-            );
+            .unwrap_or_else(|| {
+                ComputedValues::initial_values_with_font_override(Font::initial_values()).to_arc()
+            });
 
         let scale = self.scale;
 
@@ -792,12 +865,15 @@ impl ElementCx<'_, '_> {
             }
 
             // Render text
+            let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text(
                 scene,
                 text_layout.layout.lines(),
                 self.context.dom,
                 transform,
                 self.scale,
+                self.node.id,
+                &mut draw_text_context,
             );
         }
     }
@@ -855,12 +931,15 @@ impl ElementCx<'_, '_> {
             }
 
             // Render text
+            let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text(
                 scene,
                 input_data.editor.try_layout().unwrap().lines(),
                 self.context.dom,
                 transform,
                 self.scale,
+                self.node.id,
+                &mut draw_text_context,
             );
         }
     }
@@ -900,12 +979,15 @@ impl ElementCx<'_, '_> {
             let transform =
                 self.transform * Affine::translate((pos.x * self.scale, pos.y * self.scale));
 
+            let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text(
                 scene,
                 layout.lines(),
                 self.context.dom,
                 transform,
                 self.scale,
+                self.node.id,
+                &mut draw_text_context,
             );
         }
     }

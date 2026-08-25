@@ -54,7 +54,7 @@ pub struct TableContext {
     pub style: taffy::Style<Atom>,
     pub cells: Vec<TableCell>,
     pub rows: Vec<TableRow>,
-    pub computed_grid_info: AtomicRefCell<Option<DetailedGridInfo>>,
+    pub computed_grid_info: AtomicRefCell<Option<DetailedGridInfo<Atom>>>,
     pub border_style: Option<ServoArc<Border>>,
     pub border_collapse: BorderCollapse,
 }
@@ -464,7 +464,7 @@ impl taffy::LayoutGridContainer for TableTreeWrapper<'_> {
     fn set_detailed_grid_info(
         &mut self,
         _node_id: taffy::NodeId,
-        detailed_grid_info: DetailedGridInfo,
+        detailed_grid_info: DetailedGridInfo<Atom>,
     ) {
         *self.ctx.computed_grid_info.borrow_mut() = Some(detailed_grid_info);
     }
