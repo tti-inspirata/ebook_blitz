@@ -76,6 +76,7 @@ pub mod util;
 mod accessibility;
 
 pub use crate::layout::replaced::IntrinsicSizes;
+pub use crate::layout::table::{CollapsedBorders, CollapsedEdge};
 #[cfg(feature = "custom-widget")]
 pub use crate::node::Widget;
 

@@ -425,10 +425,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // rectangle passed to descendants to the visible (clipped) region so that content
         // scrolled out of view is culled rather than drawn and clipped away. The box used
         // here matches the clip applied to the content below.
-        // collapse 表格的 taffy border 是给合并边线预留的空间(见 layout::table),
-        // 单元格从 border-box 边界起铺满整个宽度,并不缩进这圈 border。按 padding-box
-        // 裁剪会把最右一列(和最后一行)的单元格背景削掉一个边框宽,和表级统一绘制的
-        // 网格线对不齐——表现为表头底色比它下面那条线窄。这类表格按 border-box 裁。
+        // collapse 表格的合并边线各占一条 gutter 轨道,整张网格(含最外圈线)都在
+        // content-box 内(见 layout::table),按 padding-box 裁剪即可。这里仍单列一支
+        // 是为了让表格的 border/padding 不影响网格:collapse 下 taffy border 已归零。
         let is_collapsed_table = node
             .element_data()
             .map(|data| {

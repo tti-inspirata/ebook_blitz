@@ -5,6 +5,7 @@ use anyrender::PaintScene;
 use blitz_dom::node::{ImageData, ImageResourceData, SpecialElementData};
 use kurbo::{self, Affine, BezPath, Point, Rect, Shape, Size, Vec2};
 use peniko::{self, Fill};
+use style::computed_values::border_collapse::T as BorderCollapse;
 use style::{
     properties::{
         generated::longhands::{
@@ -238,7 +239,15 @@ impl ElementCx<'_, '_> {
 
         let rows = PhysicalTracks::from_tracks(&grid_info.rows);
         let row_origin = rows.origin();
-        for (row, row_position) in table.rows.iter().zip(rows.iter()) {
+        // collapse 下轨道序列是 [线0, 行0, 线1, …](见 layout::table),行 r 落在
+        // 轨道 2r+1;separate 下没有 gutter 轨道,行 r 就是轨道 r。
+        let interleaved = table.border_collapse == BorderCollapse::Collapse;
+        let row_positions: Vec<taffy::Line<f32>> = rows.iter().collect();
+        for (index, row) in table.rows.iter().enumerate() {
+            let track = if interleaved { 2 * index + 1 } else { index };
+            let Some(row_position) = row_positions.get(track).copied() else {
+                continue;
+            };
             let row_node = &self.context.dom.get_node(row.node_id).unwrap();
             let Some(style) = row_node.primary_styles() else {
                 continue;
