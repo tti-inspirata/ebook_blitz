@@ -309,3 +309,11 @@ rustc-hash = { workspace = true }
 # parley = { path = "../parley/parley" }
 # fontique = { path = "../parley/fontique" }
 
+
+# blitz-dom 用了 parley fork 才有的 `TreeBuilder::set_base_direction`(CSS `direction` →
+# 段落基准方向),crates.io 的 parley 0.11.1 没有这个 API。ReaderEngine 以 root 身份构建时
+# 走它自己的 `[patch.crates-io]`,cargo 忽略非 root 包的 patch,所以那条路径不受影响;这条
+# 只为让本仓库在 flutter_reader 的 third_party/ 布局下能单独 `cargo check`。
+# 路径按同级子模块解析:third_party/ebook_blitz → third_party/ebook_parley。
+[patch.crates-io]
+parley = { path = "../ebook_parley/parley" }
