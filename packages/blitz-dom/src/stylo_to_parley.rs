@@ -13,6 +13,7 @@ pub(crate) mod stylo {
     pub(crate) use style::computed_values::text_wrap_mode::T as TextWrapMode;
     pub(crate) use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
     pub(crate) use style::properties::ComputedValues;
+    pub(crate) use style::computed_values::direction::T as Direction;
     pub(crate) use style::properties::style_structs::Font;
     pub(crate) use style::values::computed::OverflowWrap;
     pub(crate) use style::values::computed::WordBreak;
@@ -276,6 +277,18 @@ pub(crate) fn font_features(font_styles: &stylo::Font) -> Vec<parley::FontFeatur
     features.dedup_by_key(|feature| feature.tag);
 
     features
+}
+
+/// The CSS `direction` property, i.e. the paragraph's base direction.
+///
+/// Without this, Parley falls back to UAX#9 P2 first-strong detection, which is the `dir="auto"`
+/// behaviour — a `<p>` whose first strong character is Hebrew would be laid out right-to-left even
+/// though CSS says `ltr`.
+pub(crate) fn base_direction(input: stylo::Direction) -> parley::BaseDirection {
+    match input {
+        stylo::Direction::Ltr => parley::BaseDirection::Ltr,
+        stylo::Direction::Rtl => parley::BaseDirection::Rtl,
+    }
 }
 
 pub(crate) fn white_space_collapse(input: stylo::WhiteSpaceCollapse) -> parley::WhiteSpaceCollapse {

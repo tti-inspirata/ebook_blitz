@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use markup5ever::{QualName, local_name, ns};
 use parley::{
-    FontContext, InlineBox, InlineBoxKind, LayoutContext, StyleProperty, TreeBuilder,
+    BaseDirection, FontContext, InlineBox, InlineBoxKind, LayoutContext, StyleProperty, TreeBuilder,
     WhiteSpaceCollapse,
 };
 use style::{
@@ -1057,6 +1057,15 @@ pub(crate) fn build_inline_layout_into(
 
     // Create a parley tree builder
     let mut builder = layout_ctx.tree_builder(font_ctx, scale, true, &parley_style);
+
+    // Set the paragraph's base direction from CSS `direction`; Parley defaults to first-strong
+    // detection, which would flip a `ltr` paragraph that happens to start with RTL text.
+    let base_direction = root_node_style
+        .as_ref()
+        .map(|s| s.get_inherited_box().direction)
+        .map(stylo_to_parley::base_direction)
+        .unwrap_or(BaseDirection::Ltr);
+    builder.set_base_direction(base_direction);
 
     // Set whitespace collapsing mode
     let collapse_mode = root_node_style
