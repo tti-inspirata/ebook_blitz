@@ -1,73 +1,293 @@
 use anyrender::PaintScene;
 use blitz_dom::{BaseDocument, NodeId, node::TextBrush, util::ToColorColor};
-use kurbo::{Affine, BezPath, Cap, Circle, Rect, Stroke};
+use kurbo::{Affine, BezPath, Cap, Circle, Insets, Rect, Stroke, Vec2};
 use parley::{Affinity, Cursor, Layout, Line, PositionedLayoutItem, Selection};
 use peniko::Fill;
 use std::collections::HashMap;
+use style::computed_values::direction::T as Direction;
 use style::properties::generated::longhands::text_decoration_style::computed_value::T as TextDecorationStyle;
 use style::values::computed::{
-    Length, LengthPercentage, TextDecorationLength, TextDecorationLine, TextUnderlinePosition,
+    BorderCornerRadius, BorderStyle, CSSPixelLength, Length, LengthPercentage,
+    TextDecorationLength, TextDecorationLine, TextUnderlinePosition,
 };
 use style::values::generics::box_::{BaselineShift, BaselineShiftKeyword};
 use style::values::generics::text::{GenericTextDecorationInset, GenericTextDecorationLength};
 
 use crate::color::{Color, ToColorColor as _};
+use crate::kurbo_css::{CssBox, Edge, NonUniformRoundedRectRadii};
+use crate::render::border::BorderPainter;
 use crate::{FONT_EMBOLDEN_ENABLED, SELECTION_COLOR};
 
 /// Outline expansion applied per em when synthesising a bold face, matching the
 /// ~0.02 em stem growth browsers use for faux bold.
 const FAUX_BOLD_RATIO: f64 = 0.02;
 
-/// Draw the backgrounds of inline elements (e.g. `<span style="background: ...">`).
+/// One fragment of a non-atomic inline element: the part of it that falls on a
+/// single line box. A `<span>` wrapping across three lines has three fragments.
 ///
-/// Each glyph run carries the node id of the innermost inline element it belongs to
-/// (via its brush). We look up that node's `background-color` and, if non-transparent,
-/// fill a rectangle covering the run's advance and its font's ascent/descent so that the
-/// background sits behind the text.
+/// The rect is the fragment's *content area*, in the inline root's coordinate
+/// space: horizontally the union of the fragment's glyph run advances, vertically
+/// the union of their fonts' ascent/descent about the baseline (the content area
+/// of an inline box is defined by the font, not by the line box).
+struct InlineFragment {
+    line: usize,
+    x0: f64,
+    x1: f64,
+    y0: f64,
+    y1: f64,
+}
+
+/// The fragments of one non-atomic inline element, plus its depth below the
+/// inline root so that ancestors can be painted before their descendants.
+struct InlineDecorations {
+    depth: usize,
+    fragments: Vec<InlineFragment>,
+}
+
+/// The used width of one border edge, in CSS pixels.
 ///
-/// The inline root's own background is painted separately (as a normal block box), so
-/// runs belonging to the root are skipped to avoid drawing it twice.
-pub(crate) fn draw_inline_backgrounds<'a>(
+/// `border-style: none | hidden` forces a used width of zero regardless of the
+/// specified `border-width` (CSS backgrounds-3 §4.2), which stylo's computed
+/// value does not do for us.
+fn border_edge_width(border: &style::properties::style_structs::Border, edge: Edge) -> f64 {
+    let (style, width) = match edge {
+        Edge::Top => (border.border_top_style, &border.border_top_width),
+        Edge::Right => (border.border_right_style, &border.border_right_width),
+        Edge::Bottom => (border.border_bottom_style, &border.border_bottom_width),
+        Edge::Left => (border.border_left_style, &border.border_left_width),
+    };
+    match style {
+        BorderStyle::None | BorderStyle::Hidden => 0.0,
+        _ => width.0.to_f64_px(),
+    }
+}
+
+/// Draw the backgrounds and borders of the non-atomic inline elements inside an
+/// inline formatting context (e.g. `<span style="border: 1px solid">`).
+///
+/// These elements have no layout box of their own — they are flattened into the
+/// inline root's text layout as style spans — so they are never reached by the
+/// block-level paint walk and have to be painted from the text layout instead.
+/// Each glyph run carries the node id of the innermost inline element it belongs
+/// to (via its brush); walking up to the inline root from there gives every
+/// element the run is inside, so nested inlines are painted too.
+///
+/// Per CSS inline-3 §2.2, an inline box that is split across lines draws its
+/// block-start/end (top/bottom) borders on every fragment, but its inline-start
+/// and inline-end borders only on the first and last fragment respectively — and
+/// likewise for padding. The same rule governs where the background box ends.
+///
+/// Padding and borders on a non-atomic inline box do not affect layout here
+/// (they are not fed back into the line breaking), so they are painted around
+/// the text rather than displacing it.
+///
+/// `containing_width` is the width of the inline root's content box in CSS
+/// pixels: the containing block width that percentage paddings resolve against.
+pub(crate) fn draw_inline_decorations(
     scene: &mut impl PaintScene,
-    lines: impl Iterator<Item = Line<'a, TextBrush>>,
+    layout: &Layout<TextBrush>,
     doc: &BaseDocument,
     transform: Affine,
     inline_root_id: NodeId,
+    scale: f64,
+    containing_width: f64,
 ) {
-    for line in lines {
+    let mut elements: HashMap<NodeId, InlineDecorations> = HashMap::new();
+    // Ancestor path (innermost first) of the item currently being visited.
+    let mut chain: Vec<NodeId> = Vec::new();
+
+    for (line_idx, line) in layout.lines().enumerate() {
         for item in line.items() {
-            let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                continue;
+            // The node the item belongs to, and the item's content rect. For an
+            // atomic inline box the box itself has a layout box (and so paints
+            // its own background and border); it contributes to its *ancestors'*
+            // fragments, hence starting the walk at its parent.
+            let (leaf, x0, x1, y0, y1) = match item {
+                PositionedLayoutItem::GlyphRun(glyph_run) => {
+                    let metrics = glyph_run.run().metrics();
+                    let x0 = glyph_run.offset() as f64;
+                    let baseline = glyph_run.baseline() as f64;
+                    (
+                        glyph_run.style().brush.id,
+                        x0,
+                        x0 + glyph_run.advance() as f64,
+                        baseline - metrics.ascent as f64,
+                        baseline + metrics.descent as f64,
+                    )
+                }
+                PositionedLayoutItem::InlineBox(inline_box) => {
+                    let parent = doc
+                        .get_node(NodeId::from_u64(inline_box.id))
+                        .and_then(|node| node.parent);
+                    let Some(parent) = parent else {
+                        continue;
+                    };
+                    (
+                        parent,
+                        inline_box.x as f64,
+                        (inline_box.x + inline_box.width) as f64,
+                        inline_box.y as f64,
+                        (inline_box.y + inline_box.height) as f64,
+                    )
+                }
             };
 
-            let node_id = glyph_run.style().brush.id;
-            if node_id == inline_root_id {
-                continue;
+            // Collect the ancestor path from the leaf up to (but excluding) the
+            // inline root. A run belonging directly to the root yields nothing.
+            chain.clear();
+            let mut id = leaf;
+            while id != inline_root_id {
+                chain.push(id);
+                match doc.get_node(id).and_then(|node| node.parent) {
+                    Some(parent) => id = parent,
+                    // Detached from the inline root: ignore this item entirely
+                    // rather than attributing it to a partial path.
+                    None => {
+                        chain.clear();
+                        break;
+                    }
+                }
             }
 
-            let Some(styles) = doc.get_node(node_id).and_then(|node| node.primary_styles()) else {
-                continue;
+            for (depth, &node_id) in chain.iter().rev().enumerate() {
+                let entry = elements
+                    .entry(node_id)
+                    .or_insert_with(|| InlineDecorations {
+                        depth,
+                        fragments: Vec::new(),
+                    });
+                // Items are visited in line order, so an element's fragment for
+                // the current line — if it has one — is the one most recently
+                // pushed, even when runs of other elements were visited between.
+                match entry.fragments.last_mut() {
+                    Some(fragment) if fragment.line == line_idx => {
+                        fragment.x0 = fragment.x0.min(x0);
+                        fragment.x1 = fragment.x1.max(x1);
+                        fragment.y0 = fragment.y0.min(y0);
+                        fragment.y1 = fragment.y1.max(y1);
+                    }
+                    _ => entry.fragments.push(InlineFragment {
+                        line: line_idx,
+                        x0,
+                        x1,
+                        y0,
+                        y1,
+                    }),
+                }
+            }
+        }
+    }
+
+    // Outermost first, so a nested inline's background paints over its
+    // ancestors'. Ties are broken by node id to keep painting deterministic.
+    let mut elements: Vec<(NodeId, InlineDecorations)> = elements.into_iter().collect();
+    elements.sort_unstable_by_key(|(node_id, decorations)| (decorations.depth, *node_id));
+
+    for (node_id, decorations) in elements {
+        let Some(styles) = doc.get_node(node_id).and_then(|node| node.primary_styles()) else {
+            continue;
+        };
+
+        let current_color = styles.clone_color();
+        let bg_color = styles
+            .get_background()
+            .background_color
+            .resolve_to_absolute(&current_color)
+            .as_srgb_color();
+
+        let border = styles.get_border();
+        let border_widths = [Edge::Top, Edge::Right, Edge::Bottom, Edge::Left]
+            .map(|edge| border_edge_width(border, edge) * scale);
+        let [bw_top, bw_right, bw_bottom, bw_left] = border_widths;
+
+        let has_background = bg_color != Color::TRANSPARENT;
+        let has_border = border_widths.iter().any(|w| *w > 0.0);
+        if !has_background && !has_border {
+            continue;
+        }
+
+        let padding = styles.get_padding();
+        let resolve_padding = |value: &style::values::computed::LengthPercentage| -> f64 {
+            value
+                .resolve(CSSPixelLength::new(containing_width as f32))
+                .px() as f64
+                * scale
+        };
+        let pad_top = resolve_padding(&padding.padding_top.0);
+        let pad_right = resolve_padding(&padding.padding_right.0);
+        let pad_bottom = resolve_padding(&padding.padding_bottom.0);
+        let pad_left = resolve_padding(&padding.padding_left.0);
+
+        // Which physical edge is the inline-start one. Only horizontal writing
+        // modes reach here; vertical ones would map start/end onto top/bottom.
+        let rtl = styles.clone_direction() == Direction::Rtl;
+
+        let fragment_count = decorations.fragments.len();
+        for (index, fragment) in decorations.fragments.iter().enumerate() {
+            let is_first = index == 0;
+            let is_last = index + 1 == fragment_count;
+            let (has_left, has_right) = match rtl {
+                true => (is_last, is_first),
+                false => (is_first, is_last),
             };
 
-            let current_color = styles.clone_color();
-            let bg_color = styles
-                .get_background()
-                .background_color
-                .resolve_to_absolute(&current_color)
-                .as_srgb_color();
-            if bg_color == Color::TRANSPARENT {
-                continue;
+            let keep = |value: f64, present: bool| if present { value } else { 0.0 };
+            let padding_insets = Insets {
+                x0: keep(pad_left, has_left),
+                y0: pad_top,
+                x1: keep(pad_right, has_right),
+                y1: pad_bottom,
+            };
+            let border_insets = Insets {
+                x0: keep(bw_left, has_left),
+                y0: bw_top,
+                x1: keep(bw_right, has_right),
+                y1: bw_bottom,
+            };
+
+            let content_box = Rect::new(fragment.x0, fragment.y0, fragment.x1, fragment.y1);
+            let padding_box = content_box + padding_insets;
+            let border_box = padding_box + border_insets;
+
+            // Radii resolve against the fragment's own border box, as they would
+            // for a block box of the same size.
+            let resolve_w = CSSPixelLength::new((border_box.width() / scale) as f32);
+            let resolve_h = CSSPixelLength::new((border_box.height() / scale) as f32);
+            let resolve_radii = |radius: &BorderCornerRadius| -> Vec2 {
+                Vec2 {
+                    x: scale * radius.0.width.0.resolve(resolve_w).px() as f64,
+                    y: scale * radius.0.height.0.resolve(resolve_h).px() as f64,
+                }
+            };
+            let border_radii = NonUniformRoundedRectRadii {
+                top_left: resolve_radii(&border.border_top_left_radius),
+                top_right: resolve_radii(&border.border_top_right_radius),
+                bottom_right: resolve_radii(&border.border_bottom_right_radius),
+                bottom_left: resolve_radii(&border.border_bottom_left_radius),
+            };
+
+            let css_box = CssBox::new(border_box, border_insets, padding_insets, 0.0, border_radii);
+
+            // The background of an inline box covers its padding box.
+            if has_background {
+                scene.fill(
+                    Fill::NonZero,
+                    transform,
+                    bg_color,
+                    None,
+                    &css_box.padding_box_path(),
+                );
             }
 
-            let metrics = glyph_run.run().metrics();
-            let x = glyph_run.offset() as f64;
-            let w = glyph_run.advance() as f64;
-            let baseline = glyph_run.baseline() as f64;
-            let y0 = baseline - metrics.ascent as f64;
-            let y1 = baseline + metrics.descent as f64;
-            let rect = Rect::new(x, y0, x + w, y1);
-
-            scene.fill(Fill::NonZero, transform, bg_color, None, &rect);
+            if has_border {
+                BorderPainter {
+                    frame: &css_box,
+                    style: &styles,
+                    transform,
+                    scale,
+                }
+                .draw_border(scene);
+            }
         }
     }
 }

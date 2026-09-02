@@ -11,9 +11,10 @@ use style::{
 
 use crate::{
     color::{ToColorColor as _, contrast_ratio},
-    kurbo_css::Edge,
+    kurbo_css::{CssBox, Edge},
     render::{ElementCx, PhysicalTracks},
 };
+use style::properties::ComputedValues;
 
 /// A darker version of a colour (mirrors WebKit/Blink's `Color::Dark`): the
 /// brightest channel is reduced by a fixed amount and the others scaled to match,
@@ -145,6 +146,21 @@ fn sample_points_along_path(path: &BezPath, spacing: f64, count: usize) -> Vec<P
     points
 }
 
+/// Draws the CSS borders of a single box, given only its geometry and computed
+/// style.
+///
+/// Split out of [`ElementCx`] so that the non-atomic inline elements — which have
+/// no layout box of their own and are painted from the containing inline root's
+/// text layout — can draw their borders through exactly the same code, and so get
+/// every `border-style`, per-edge colour and `border-radius` for free. See
+/// [`crate::text::draw_inline_decorations`].
+pub(crate) struct BorderPainter<'a> {
+    pub frame: &'a CssBox,
+    pub style: &'a ComputedValues,
+    pub transform: Affine,
+    pub scale: f64,
+}
+
 impl ElementCx<'_, '_> {
     /// Draw all borders for a node
     pub(crate) fn draw_border(&self, scene: &mut impl PaintScene) {
@@ -157,7 +173,20 @@ impl ElementCx<'_, '_> {
             }
         }
 
-        let style = &*self.style;
+        BorderPainter {
+            frame: &self.frame,
+            style: &self.style,
+            transform: self.transform,
+            scale: self.scale,
+        }
+        .draw_border(scene);
+    }
+}
+
+impl BorderPainter<'_> {
+    /// Draw all borders of the box.
+    pub(crate) fn draw_border(&self, scene: &mut impl PaintScene) {
+        let style = self.style;
         let border = style.get_border();
         let current_color = style.clone_color();
 
@@ -518,7 +547,9 @@ impl ElementCx<'_, '_> {
         scene.fill(Fill::NonZero, self.transform, color, None, &path);
         scene.pop_layer();
     }
+}
 
+impl ElementCx<'_, '_> {
     /// 绘制 collapse 表格合并后的网格线。
     ///
     /// 每条线在每个单元格列/行上是独立的一段(见 `CollapsedBorders`):宽度、样式、

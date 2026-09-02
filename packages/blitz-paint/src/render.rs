@@ -1,5 +1,5 @@
 mod background;
-mod border;
+pub(crate) mod border;
 mod box_shadow;
 mod clip_path;
 mod form_controls;
@@ -842,14 +842,18 @@ impl ElementCx<'_, '_> {
             let transform =
                 self.transform * Affine::translate((pos.x * self.scale, pos.y * self.scale));
 
-            // Render inline element backgrounds (e.g. `<span style="background: ...">`)
-            // behind the text and selection highlight.
-            crate::text::draw_inline_backgrounds(
+            // Render the backgrounds and borders of the inline elements inside
+            // this inline formatting context (e.g. `<span style="border: ...">`),
+            // behind the text and selection highlight. They have no layout box of
+            // their own, so the block-level walk never reaches them.
+            crate::text::draw_inline_decorations(
                 scene,
-                text_layout.layout.lines(),
+                &text_layout.layout,
                 self.context.dom,
                 transform,
                 self.node.id,
+                self.scale,
+                self.frame.content_box.width() / self.scale,
             );
 
             // Render text selection highlight (if any) using cached selection ranges
