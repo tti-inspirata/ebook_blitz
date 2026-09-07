@@ -39,7 +39,7 @@ impl BaseDocument {
         damage_from_parent: RestyleDamage,
     ) -> RestyleDamage {
         let mut damage = if let Some(data) = self.nodes[node_id]
-            .stylo_element_data_opt_mut()
+            .try_stylo_element_data_mut()
             .and_then(|s| s.get_mut())
         {
             data.damage
@@ -96,7 +96,7 @@ impl BaseDocument {
         // If the node or any of it's children have been mutated or their layout styles
         // have changed, then we should clear it's layout cache.
         if damage.intersects(ONLY_RELAYOUT | CONSTRUCT_BOX) {
-            node.cache_mut().clear();
+            node.clear_layout_cache();
             if let Some(inline_layout) = node
                 .data
                 .downcast_element_mut()
@@ -448,7 +448,7 @@ impl BaseDocument {
         // borrow of `node` (held by the stylo element data guard) is released
         // before we take a mutable borrow of `node.data` below.
         let style = {
-            let stylo_element_data = node.stylo_element_data_opt().and_then(|s| s.get());
+            let stylo_element_data = node.try_stylo_element_data().and_then(|s| s.get());
             let primary_styles = stylo_element_data
                 .as_ref()
                 .and_then(|data| data.styles.get_primary());
@@ -470,7 +470,7 @@ impl BaseDocument {
         };
 
         let len = style_images.len();
-        elem_images.resize_with(len, || None);
+        elem_images.resize(len, None);
 
         for idx in 0..len {
             let style_image = &style_images[idx];
@@ -531,7 +531,7 @@ impl BaseDocument {
         }
     }
 
-    /// Walk the whole tree, converting styles to layout
+    /// Walk the whole tree, rebuilding paint children and hoisting z-indexed boxes
     fn flush_styles_to_layout_impl(
         &mut self,
         node_id: NodeId,
@@ -543,37 +543,15 @@ impl BaseDocument {
         let incremental = self.incremental_layout;
         let display = {
             let node = self.nodes.get_mut(node_id).unwrap();
-            let _damage = node.damage().unwrap_or(ALL_DAMAGE);
 
-            // Compute the owned taffy style and display in an inner scope so the
-            // immutable borrow of `node` (held by the stylo element data guard)
-            // is released before we mutably access `node` below.
-            let (mut taffy_style, display_constructed_as) = {
-                let stylo_element_data = node.stylo_element_data_opt().and_then(|s| s.get());
-                let primary_styles = stylo_element_data
-                    .as_ref()
-                    .and_then(|data| data.styles.get_primary());
-
-                let Some(style) = primary_styles else {
-                    return;
-                };
-
-                (stylo_taffy::to_taffy_style(style), style.clone_display())
+            let Some(display) = node.display_style() else {
+                return;
             };
-            taffy_style.item_is_replaced = node
-                .data
-                .downcast_element()
-                .is_some_and(|el| crate::layout::replaced::is_replaced_element(&el.name.local));
-
-            // if damage.intersects(RestyleDamage::RELAYOUT | CONSTRUCT_BOX) {
-            *node.style_mut() = taffy_style;
-            *node.display_constructed_as_mut() = display_constructed_as;
-            // }
 
             // In non-incremental mode we unconditionally clear the Taffy cache.
             // In incremental mode this is handled as part of damage propagation.
             if !incremental {
-                node.cache_mut().clear();
+                node.clear_layout_cache();
                 if let Some(inline_layout) = node
                     .data
                     .downcast_element_mut()
@@ -583,13 +561,14 @@ impl BaseDocument {
                 }
             }
 
-            node.style().display
+            display
         };
 
         // If the node has children, then take those children and...
         let children = self.nodes[node_id].layout_children.borrow_mut().take();
         if let Some(mut children) = children {
-            let is_flex_or_grid = matches!(display, taffy::Display::Flex | taffy::Display::Grid);
+            let is_flex_or_grid =
+                matches!(display.inside(), DisplayInside::Flex | DisplayInside::Grid);
 
             // Recursively call flush_styles_to_layout on each child
             for &child in children.iter() {

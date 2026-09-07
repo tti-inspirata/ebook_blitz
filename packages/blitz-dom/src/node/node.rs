@@ -18,7 +18,6 @@ use std::fmt::Write;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use style::Atom;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::properties::ComputedValues;
 use style::properties::generated::longhands::position::computed_value::T as Position;
@@ -31,14 +30,11 @@ use style::values::computed::Display as StyloDisplay;
 use style::values::specified::box_::{DisplayInside, DisplayOutside};
 use style_dom::ElementState;
 use style_traits::values::ToCss;
-use taffy::{
-    Cache,
-    prelude::{Layout, Style},
-};
+use taffy::{Cache, prelude::Layout};
 use thin_vec::ThinVec;
 
-use super::stylo_data::StyloData;
-use super::{Attribute, DocumentData, ElementData};
+use super::stylo_data::{ComputedStyleRef, StyloData};
+use super::{Attribute, DocumentData, ElementData, LayoutData};
 
 #[derive(Clone, Copy)]
 enum OutputStyle {
@@ -159,13 +155,7 @@ macro_rules! universal_accessors {
 
 universal_accessors! {
     stylo_element_data / stylo_element_data_mut: StyloData,
-    style / style_mut: Style<Atom>,
-    cache / cache_mut: Cache,
-    unrounded_layout / unrounded_layout_mut: Layout,
-    final_layout / final_layout_mut: Layout,
-    scroll_offset / scroll_offset_mut: crate::Point<f64>,
-    scrollable_overflow / scrollable_overflow_mut: KurboRect,
-    transform / transform_mut: Option<Affine>,
+    transform / transform_mut: Option<Box<Affine>>,
     display_constructed_as / display_constructed_as_mut: StyloDisplay,
     // The document node is styled/snapshotted like an element, so it also
     // carries these:
@@ -178,10 +168,111 @@ universal_accessors! {
 }
 
 impl Node {
+    /// This node's layout output state, or a shared default if layout has
+    /// never written to this node.
+    ///
+    /// Panics for node kinds which do not participate in layout (text and
+    /// comment nodes).
+    #[inline]
+    pub fn layout_data(&self) -> &LayoutData {
+        match &self.data {
+            NodeData::Element(data) | NodeData::AnonymousBlock(data) => data.layout_data(),
+            NodeData::Document(data) => data.layout_data(),
+            _ => panic!("`layout_data` is not available on this node kind"),
+        }
+    }
+
+    /// Mutable access to this node's layout output state, allocating it if it
+    /// does not yet exist.
+    ///
+    /// Panics for node kinds which do not participate in layout (text and
+    /// comment nodes).
+    #[inline]
+    pub fn layout_data_mut(&mut self) -> &mut LayoutData {
+        match &mut self.data {
+            NodeData::Element(data) | NodeData::AnonymousBlock(data) => data.layout_data_mut(),
+            NodeData::Document(data) => data.layout_data_mut(),
+            _ => panic!("`layout_data` is not available on this node kind"),
+        }
+    }
+
+    /// Mutable access to this node's layout output state, if it has been
+    /// allocated. Never allocates. Returns `None` for node kinds which do not
+    /// participate in layout.
+    #[inline]
+    pub fn try_layout_data_mut(&mut self) -> Option<&mut LayoutData> {
+        match &mut self.data {
+            NodeData::Element(data) | NodeData::AnonymousBlock(data) => {
+                data.layout_data.as_deref_mut()
+            }
+            NodeData::Document(data) => data.layout_data.as_deref_mut(),
+            _ => None,
+        }
+    }
+
+    /// Clear this node's taffy layout cache without allocating `LayoutData`
+    /// for nodes that have never been laid out.
+    #[inline]
+    pub fn clear_layout_cache(&mut self) {
+        if let Some(layout_data) = self.try_layout_data_mut() {
+            layout_data.cache.clear();
+        }
+    }
+
+    #[inline]
+    pub fn cache(&self) -> &Cache {
+        &self.layout_data().cache
+    }
+
+    #[inline]
+    pub fn cache_mut(&mut self) -> &mut Cache {
+        &mut self.layout_data_mut().cache
+    }
+
+    #[inline]
+    pub fn unrounded_layout(&self) -> &Layout {
+        &self.layout_data().unrounded_layout
+    }
+
+    #[inline]
+    pub fn unrounded_layout_mut(&mut self) -> &mut Layout {
+        &mut self.layout_data_mut().unrounded_layout
+    }
+
+    #[inline]
+    pub fn final_layout(&self) -> &Layout {
+        &self.layout_data().final_layout
+    }
+
+    #[inline]
+    pub fn final_layout_mut(&mut self) -> &mut Layout {
+        &mut self.layout_data_mut().final_layout
+    }
+
+    #[inline]
+    pub fn scroll_offset(&self) -> &crate::Point<f64> {
+        &self.layout_data().scroll_offset
+    }
+
+    #[inline]
+    pub fn scroll_offset_mut(&mut self) -> &mut crate::Point<f64> {
+        &mut self.layout_data_mut().scroll_offset
+    }
+
+    #[inline]
+    pub fn scrollable_overflow(&self) -> &KurboRect {
+        &self.layout_data().scrollable_overflow
+    }
+
+    #[inline]
+    pub fn scrollable_overflow_mut(&mut self) -> &mut KurboRect {
+        &mut self.layout_data_mut().scrollable_overflow
+    }
+
     /// Style data from stylo, if this node kind carries it (element or document
     /// nodes). Returns `None` for text/comment nodes.
     #[inline]
-    pub fn stylo_element_data_opt(&self) -> Option<&StyloData> {
+    pub fn try_stylo_element_data(&self) -> Option<&StyloData> {
         match &self.data {
             NodeData::Element(data) | NodeData::AnonymousBlock(data) => {
                 Some(&data.stylo_element_data)
@@ -192,7 +283,7 @@ impl Node {
     }
 
     #[inline]
-    pub fn stylo_element_data_opt_mut(&mut self) -> Option<&mut StyloData> {
+    pub fn try_stylo_element_data_mut(&mut self) -> Option<&mut StyloData> {
         match &mut self.data {
             NodeData::Element(data) | NodeData::AnonymousBlock(data) => {
                 Some(&mut data.stylo_element_data)
@@ -322,7 +413,12 @@ impl Node {
             })
         });
 
-        *self.transform_mut() = transform;
+        let slot = self.transform_mut();
+        match (slot.as_deref_mut(), transform) {
+            (Some(existing), Some(new)) => *existing = new,
+            (None, Some(new)) => *slot = Some(Box::new(new)),
+            (_, None) => *slot = None,
+        }
         transform
     }
 
@@ -406,7 +502,7 @@ impl Node {
     }
 
     pub fn set_restyle_hint(&mut self, hint: RestyleHint) {
-        if let Some(stylo_element_data) = self.stylo_element_data_opt_mut() {
+        if let Some(stylo_element_data) = self.try_stylo_element_data_mut() {
             if let Some(mut element_data) = stylo_element_data.get_mut() {
                 element_data.hint.insert(hint);
             }
@@ -434,17 +530,6 @@ impl Node {
         if let Some(flag) = self.dirty_descendants_flag() {
             flag.store(false, Ordering::Relaxed);
         }
-    }
-
-    /// Set appropriate damage for Stylo when an element's style attribute is updated
-    pub(crate) fn mark_style_attr_updated(&mut self) {
-        if let Some(stylo_element_data) = self.stylo_element_data_opt_mut() {
-            if let Some(mut data) = stylo_element_data.get_mut() {
-                data.hint |= RestyleHint::RESTYLE_STYLE_ATTRIBUTE;
-            }
-        }
-        self.set_dirty_descendants();
-        self.mark_ancestors_dirty();
     }
 
     /// Marks all ancestors of this node as having dirty descendants.
@@ -511,12 +596,12 @@ impl Node {
     // }
 
     pub fn damage(&self) -> Option<RestyleDamage> {
-        self.stylo_element_data_opt()
+        self.try_stylo_element_data()
             .and_then(|stylo| stylo.get().map(|data| data.damage))
     }
 
     pub fn set_damage(&mut self, damage: RestyleDamage) {
-        if let Some(stylo) = self.stylo_element_data_opt_mut() {
+        if let Some(stylo) = self.try_stylo_element_data_mut() {
             if let Some(mut data) = stylo.get_mut() {
                 data.damage = damage;
             }
@@ -524,7 +609,7 @@ impl Node {
     }
 
     pub fn insert_damage(&mut self, damage: RestyleDamage) {
-        if let Some(stylo) = self.stylo_element_data_opt_mut() {
+        if let Some(stylo) = self.try_stylo_element_data_mut() {
             if let Some(mut data) = stylo.get_mut() {
                 data.damage |= damage;
             }
@@ -535,7 +620,7 @@ impl Node {
     }
 
     pub fn remove_damage(&mut self, damage: RestyleDamage) {
-        if let Some(stylo) = self.stylo_element_data_opt_mut() {
+        if let Some(stylo) = self.try_stylo_element_data_mut() {
             if let Some(mut data) = stylo.get_mut() {
                 data.damage.remove(damage);
             }
@@ -543,7 +628,7 @@ impl Node {
     }
 
     pub fn clear_damage_mut(&mut self) {
-        if let Some(stylo) = self.stylo_element_data_opt_mut() {
+        if let Some(stylo) = self.try_stylo_element_data_mut() {
             if let Some(mut data) = stylo.get_mut() {
                 data.damage = RestyleDamage::empty();
             }
@@ -1083,8 +1168,37 @@ impl Node {
     }
 
     pub fn primary_styles(&self) -> Option<impl Deref<Target = ServoArc<ComputedValues>>> {
-        self.stylo_element_data_opt()
+        self.try_stylo_element_data()
             .and_then(|stylo| stylo.primary_styles())
+    }
+
+    /// A lazy Taffy style backed by this node's primary stylo style.
+    ///
+    /// Panics if the node has no computed styles: layout always runs after
+    /// styling, and the only unstyled nodes (text, comments, descendants of
+    /// `display: none`) are never queried by Taffy.
+    pub fn layout_style(&self) -> stylo_taffy::TaffyStyloStyle<ComputedStyleRef<'_>> {
+        let styles = self
+            .try_stylo_element_data()
+            .and_then(|stylo| stylo.computed_styles())
+            .expect("layout_style() called on a node without computed styles");
+
+        let mut flags = stylo_taffy::StyleFlags::empty();
+        if let Some(el) = self.data.downcast_element() {
+            if crate::layout::replaced::is_replaced_element(&el.name.local) {
+                flags |= stylo_taffy::StyleFlags::IS_REPLACED;
+            }
+        }
+
+        stylo_taffy::TaffyStyloStyle::new(styles, flags)
+    }
+
+    /// The node's `display` as a [`taffy::Display`]. Returns [`taffy::Display::Block`]
+    /// for nodes without computed styles (e.g. text nodes).
+    pub fn taffy_display(&self) -> taffy::Display {
+        self.primary_styles()
+            .map(|s| stylo_taffy::convert::display(s.clone_display()))
+            .unwrap_or(taffy::Display::Block)
     }
 
     pub fn text_content(&self) -> String {
@@ -1209,7 +1323,7 @@ impl Node {
         let mut x = x - self.final_layout().location.x + self.scroll_offset().x as f32;
         let mut y = y - self.final_layout().location.y + self.scroll_offset().y as f32;
 
-        if let Some(t) = *self.transform() {
+        if let Some(t) = self.transform().as_deref() {
             let p = t.inverse() * kurbo::Point::new(x as f64 * scale, y as f64 * scale);
             x = (p.x / scale) as f32;
             y = (p.y / scale) as f32;
@@ -1572,7 +1686,7 @@ impl std::fmt::Debug for Node {
             .field("layout_children", &self.layout_children.borrow())
             // .field("style", &self.style)
             .field("node", &self.data)
-            .field("stylo_element_data", &self.stylo_element_data_opt())
+            .field("stylo_element_data", &self.try_stylo_element_data())
             // .field("unrounded_layout", &self.unrounded_layout)
             // .field("final_layout", &self.final_layout)
             .finish()

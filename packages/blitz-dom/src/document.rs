@@ -724,7 +724,7 @@ impl BaseDocument {
             self.url.url_extra_data(),
         );
         if did_change {
-            node.mark_style_attr_updated();
+            node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         }
     }
 
@@ -736,7 +736,7 @@ impl BaseDocument {
             self.url.url_extra_data(),
         );
         if did_change {
-            node.mark_style_attr_updated();
+            node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         }
     }
 
@@ -1157,6 +1157,7 @@ impl BaseDocument {
                 net_provider: self.net_provider.clone(),
                 shell_provider: self.shell_provider.clone(),
                 abort_signal: self.abort_signal.clone(),
+                import_depth: 0,
             }),
             None,
             QuirksMode::NoQuirks,
@@ -1369,7 +1370,7 @@ impl BaseDocument {
                         SpecialElementData::Image(Box::new(image.clone()));
 
                     // Clear layout cache
-                    node.cache_mut().clear();
+                    node.clear_layout_cache();
                     node.insert_damage(ALL_DAMAGE);
                 }
                 ImageType::Background(idx) | ImageType::Mask(idx) => {

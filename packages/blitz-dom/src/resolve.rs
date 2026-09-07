@@ -164,15 +164,24 @@ impl BaseDocument {
             return Rect::ZERO;
         }
 
+        let scale = self.viewport.scale_f64();
+
         if !self.nodes[node_id]
             .damage()
             .map(|d| d.contains(style::selector_parser::RestyleDamage::RECALCULATE_OVERFLOW))
             .unwrap_or(false)
         {
-            return *self.nodes[node_id].scrollable_overflow();
-        }
+            let node = &self.nodes[node_id];
+            let location = node.final_layout().location.map(|v| v as f64 * scale);
 
-        let scale = self.viewport.scale_f64();
+            let mut transform = Affine::translate((location.x, location.y));
+            if let Some(t) = node.transform().as_deref() {
+                transform *= *t
+            }
+
+            let overflow = *node.scrollable_overflow();
+            return transform.transform_rect_bbox(overflow);
+        }
 
         let transform = self.nodes[node_id].set_transform(scale as f32);
 
@@ -269,7 +278,7 @@ impl BaseDocument {
                     resolve_layout_children_recursive(doc, child_id);
                     doc.nodes[child_id].layout_parent.set(Some(node_id));
                     if let Some(mut data) = doc.nodes[child_id]
-                        .stylo_element_data_opt_mut()
+                        .try_stylo_element_data_mut()
                         .and_then(|s| s.get_mut())
                     {
                         data.damage
@@ -374,7 +383,7 @@ impl BaseDocument {
         for result in results {
             match result.data {
                 ConstructionTaskResultData::InlineLayout(layout) => {
-                    self.nodes[result.node_id].cache_mut().clear();
+                    self.nodes[result.node_id].clear_layout_cache();
                     self.nodes[result.node_id]
                         .element_data_mut()
                         .unwrap()
