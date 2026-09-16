@@ -1050,8 +1050,8 @@ impl ElementCx<'_, '_> {
             return;
         };
 
-        let width = self.frame.content_box.width() as u32;
-        let height = self.frame.content_box.height() as u32;
+        let width = self.frame.content_box.width() as f32;
+        let height = self.frame.content_box.height() as f32;
         let svg_size = svg.size();
 
         let x = self.frame.content_box.origin().x;
@@ -1061,10 +1061,7 @@ impl ElementCx<'_, '_> {
         let object_position = self.style.clone_object_position();
 
         // Apply object-fit algorithm
-        let container_size = taffy::Size {
-            width: width as f32,
-            height: height as f32,
-        };
+        let container_size = taffy::Size { width, height };
         let object_size = taffy::Size {
             width: svg_size.width(),
             height: svg_size.height(),
@@ -1094,8 +1091,8 @@ impl ElementCx<'_, '_> {
 
     fn draw_image(&self, scene: &mut impl PaintScene) {
         if let Some(image) = self.element.raster_image_data() {
-            let width = self.frame.content_box.width() as u32;
-            let height = self.frame.content_box.height() as u32;
+            let width = self.frame.content_box.width() as f32;
+            let height = self.frame.content_box.height() as f32;
             let x = self.frame.content_box.origin().x;
             let y = self.frame.content_box.origin().y;
 
@@ -1105,10 +1102,7 @@ impl ElementCx<'_, '_> {
             let quality = to_image_quality(image_rendering);
 
             // Apply object-fit algorithm
-            let container_size = taffy::Size {
-                width: width as f32,
-                height: height as f32,
-            };
+            let container_size = taffy::Size { width, height };
             let object_size = taffy::Size {
                 width: image.width as f32,
                 height: image.height as f32,
