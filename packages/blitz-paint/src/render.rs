@@ -5,7 +5,7 @@ mod clip_path;
 mod form_controls;
 mod mask;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -114,6 +114,10 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) initial_y: f64,
     /// The id of the document's root element (cached to avoid re-resolving it for every element)
     pub(crate) root_element_id: Option<NodeId>,
+    /// The element whose background was propagated to the canvas, set while painting.
+    /// Per CSS Backgrounds 3 §2.11.2 that element must not paint its own background
+    /// again, otherwise it would cover anything drawn onto the canvas beneath it.
+    pub(crate) canvas_background_source: Cell<Option<NodeId>>,
     /// Scrollbar hover/drag state, resolved once per scene like the root element
     #[cfg(feature = "scrollbars")]
     pub(crate) hovered_scrollbar: Option<blitz_dom::node::ScrollbarRef>,
@@ -157,6 +161,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             initial_x,
             initial_y,
             root_element_id,
+            canvas_background_source: Cell::new(None),
             #[cfg(feature = "scrollbars")]
             hovered_scrollbar: dom.hovered_scrollbar(),
             #[cfg(feature = "scrollbars")]
@@ -173,7 +178,19 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     ///
     /// This assumes styles are resolved and layout is complete.
     /// Make sure you do those before trying to render
-    pub fn paint_scene(&self, scene: &mut impl PaintScene) {
+    pub fn paint_scene<S: PaintScene>(&self, scene: &mut S) {
+        self.paint_scene_with_hook(scene, |_| {});
+    }
+
+    /// Same as [`Self::paint_scene`], but calls `after_root_background` once the
+    /// root background has been filled and before any content is painted, so the
+    /// caller can draw underneath the document's text. It is not called when there
+    /// is nothing to paint at all (pending critical resources / no root element).
+    pub fn paint_scene_with_hook<S: PaintScene>(
+        &self,
+        scene: &mut S,
+        after_root_background: impl FnOnce(&mut S),
+    ) {
         if self.dom.has_pending_critical_resources() {
             return;
         }
@@ -191,33 +208,38 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         let bg_width = (self.width as f32).max(root_element.final_layout().size.width);
         let bg_height = (self.height as f32).max(root_element.final_layout().size.height);
 
-        let background_color = {
+        // Also remember which element the canvas background came from: it is painted
+        // here, covering the whole canvas, so that element must not paint its own
+        // background again (CSS Backgrounds 3 §2.11.2 — the propagated background has
+        // a used value of `transparent` on the element itself).
+        let (background_color, background_source) = {
             let html_color = root_element
                 .primary_styles()
                 .map(|s| s.clone_background_color())
                 .unwrap_or(GenericColor::TRANSPARENT_BLACK);
             if html_color == GenericColor::TRANSPARENT_BLACK {
-                root_element
-                    .children
-                    .iter()
-                    .find_map(|id| {
-                        self.dom
-                            .as_ref()
-                            .get_node(*id)
-                            .filter(|node| node.data.is_element_with_tag_name(&local_name!("body")))
-                    })
-                    .and_then(|body| body.primary_styles())
-                    .map(|style| {
-                        let current_color = style.clone_color();
-                        style
-                            .clone_background_color()
-                            .resolve_to_absolute(&current_color)
-                    })
+                let body = root_element.children.iter().find_map(|id| {
+                    self.dom
+                        .as_ref()
+                        .get_node(*id)
+                        .filter(|node| node.data.is_element_with_tag_name(&local_name!("body")))
+                });
+                let color = body.and_then(|body| body.primary_styles()).map(|style| {
+                    let current_color = style.clone_color();
+                    style
+                        .clone_background_color()
+                        .resolve_to_absolute(&current_color)
+                });
+                (color, body.map(|body| body.id))
             } else {
                 let current_color = root_element.primary_styles().unwrap().clone_color();
-                Some(html_color.resolve_to_absolute(&current_color))
+                (
+                    Some(html_color.resolve_to_absolute(&current_color)),
+                    Some(root_id),
+                )
             }
         };
+        self.canvas_background_source.set(background_source);
 
         if let Some(bg_color) = background_color {
             let bg_color = bg_color.as_srgb_color();
@@ -227,6 +249,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             );
             scene.fill(Fill::NonZero, Affine::IDENTITY, bg_color, None, &rect);
         }
+
+        after_root_background(scene);
 
         // The root clip rectangle is the viewport (in screen coordinates, with the
         // initial offset already subtracted). Elements outside of this are culled, and

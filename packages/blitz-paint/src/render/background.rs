@@ -271,6 +271,12 @@ impl ElementCx<'_, '_> {
     }
 
     fn draw_solid_bg(&self, scene: &mut impl PaintScene, shape: &BezPath) {
+        // The element whose background was propagated to the canvas already had it
+        // painted there; painting it again here would cover the canvas
+        // (CSS Backgrounds 3 §2.11.2).
+        if self.context.canvas_background_source.get() == Some(self.node.id) {
+            return;
+        }
         let current_color = self.style.clone_color();
         let background_color = &self.style.get_background().background_color;
         let bg_color = background_color

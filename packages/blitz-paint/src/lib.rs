@@ -40,14 +40,34 @@ type CustomWidgetSceneMap = HashMap<(usize, NodeId), Scene>;
 /// The implementation of [`PaintScene`] is responsible for handling the commands that are pushed into it.
 /// Generally this will involve executing them to draw a rasterized image/texture. But in some cases it may choose to
 /// transform them to a vector format (e.g. SVG/PDF) or serialize them in raw form for later use.
-pub fn paint_scene(
-    scene: &mut impl PaintScene,
+pub fn paint_scene<S: PaintScene>(
+    scene: &mut S,
     doc: &mut BaseDocument,
     scale: f64,
     width: u32,
     height: u32,
     x_offset: u32,
     y_offset: u32,
+) {
+    paint_scene_with_hook(scene, doc, scale, width, height, x_offset, y_offset, |_| {});
+}
+
+/// Same as [`paint_scene`], but calls `after_root_background` right after the root
+/// element's background has been filled and before any document content is painted.
+///
+/// This is the only point at which a caller can insert its own drawing commands
+/// *underneath* the document's text: the root background fill covers the whole
+/// viewport, so anything pushed into the scene before [`paint_scene`] is painted
+/// over. Used for highlight underlays.
+pub fn paint_scene_with_hook<S: PaintScene>(
+    scene: &mut S,
+    doc: &mut BaseDocument,
+    scale: f64,
+    width: u32,
+    height: u32,
+    x_offset: u32,
+    y_offset: u32,
+    after_root_background: impl FnOnce(&mut S),
 ) {
     // Run `.paint()` on every custom widget in the document (and all subdocuments) ahead of time.
     // This helps us avoid borrow-checker issues as we recurse down the tree (`.paint()` require `&mut self`).
@@ -67,7 +87,7 @@ pub fn paint_scene(
         y_offset as f64,
         &custom_widget_scenes,
     );
-    generator.paint_scene(scene);
+    generator.paint_scene_with_hook(scene, after_root_background);
 
     // println!(
     //     "Rendered using {} clips (depth: {}) (wanted: {})",
