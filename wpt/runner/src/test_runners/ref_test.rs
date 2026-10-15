@@ -10,12 +10,17 @@ use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 use url::Url;
 
 use super::fuzzy::{FuzzySpec, fuzzy_buffer_diff, parse_fuzzy_metas, tolerance_for_reference};
+use blitz_vibey_script::ScriptDocument;
+
 use super::{
-    document_has_scripts, parse_and_resolve_document, pump_net_provider, run_document_scripts,
+    document_has_scripts, parse_and_resolve_document, pump_net_provider, pump_timers,
+    run_document_scripts,
 };
+use crate::test_variants::{artifact_name, split_test_url};
 use crate::{BufferKind, HEIGHT, SCALE, SubtestCounts, TestFlags, ThreadCtx, WIDTH};
 
 pub fn process_ref_test(
@@ -28,7 +33,7 @@ pub fn process_ref_test(
 ) -> SubtestCounts {
     let test_out_path = ctx
         .out_dir
-        .join(format!("{}{}", test_relative_path, "-test.png"));
+        .join(format!("{}-test.png", artifact_name(test_relative_path)));
     render_html_to_buffer(
         ctx,
         BufferKind::Test,
@@ -108,7 +113,7 @@ fn render_reference_and_compare(
     flags: &mut TestFlags,
 ) -> Option<bool> {
     let test_url = ctx.dummy_base_url.join(test_relative_path).unwrap();
-    let ref_url: Url = match test_url.join(ref_file) {
+    let ref_url: Url = match resolve_reference_url(&test_url, ref_file) {
         Ok(url) => url,
         Err(err) => {
             warn!("Skipping {test_relative_path}: unresolvable ref href {ref_file:?} ({err})");
@@ -117,11 +122,14 @@ fn render_reference_and_compare(
     };
 
     // An `about:blank` reference is a blank page: render the ref as an empty document.
-    let (ref_relative_path, ref_html) = if ref_url.as_str() == "about:blank" {
+    let (ref_relative_path, ref_html) = if ref_url.scheme() == "about" && ref_url.path() == "blank"
+    {
         (test_relative_path.to_string(), String::new())
     } else if ref_url.scheme() == ctx.dummy_base_url.scheme() {
-        let ref_relative_path = ref_url.path().strip_prefix('/').unwrap().to_string();
-        let ref_path = ctx.wpt_dir.join(&ref_relative_path);
+        let ref_relative_path = ref_url[url::Position::BeforePath..]
+            .trim_start_matches('/')
+            .to_string();
+        let ref_path = ctx.wpt_dir.join(ref_url.path().trim_start_matches('/'));
         match fs::read_to_string(&ref_path) {
             Ok(html) => (ref_relative_path, html),
             Err(err) => {
@@ -161,9 +169,10 @@ fn render_reference_and_compare(
     } else {
         format!("-{ref_index}")
     };
-    let ref_out_path = ctx
-        .out_dir
-        .join(format!("{test_relative_path}-ref{suffix}.png"));
+    let ref_out_path = ctx.out_dir.join(format!(
+        "{}-ref{suffix}.png",
+        artifact_name(test_relative_path)
+    ));
     render_html_to_buffer(
         ctx,
         BufferKind::Ref,
@@ -195,9 +204,10 @@ fn render_reference_and_compare(
     let diff = dify::diff::get_results(test_image, ref_image, 0.1f32, true, None, &None, &None);
 
     if let Some(diff) = diff {
-        let path = ctx
-            .out_dir
-            .join(format!("{test_relative_path}-diff{suffix}.png"));
+        let path = ctx.out_dir.join(format!(
+            "{}-diff{suffix}.png",
+            artifact_name(test_relative_path)
+        ));
         let parent = path.parent().unwrap();
         fs::create_dir_all(parent).unwrap();
         diff.1.save_with_format(path, ImageFormat::Png).unwrap();
@@ -205,6 +215,11 @@ fn render_reference_and_compare(
     } else {
         Some(is_match)
     }
+}
+
+fn resolve_reference_url(test_url: &Url, ref_file: &str) -> Result<Url, url::ParseError> {
+    let variant = split_test_url(test_url.as_str()).1;
+    test_url.join(&format!("{ref_file}{variant}"))
 }
 
 fn render_html_to_buffer(
@@ -221,6 +236,7 @@ fn render_html_to_buffer(
         // to render correctly: upgrade it to a `ScriptDocument` (without
         // reparsing) and execute its scripts before rendering.
         let mut script_document = run_document_scripts(ctx, document);
+        wait_for_screenshot_ready(&mut script_document);
         for error in script_document.take_js_errors() {
             warn!("{relative_path}: {error}");
         }
@@ -234,6 +250,50 @@ fn render_html_to_buffer(
     } else {
         render_document_to_buffer(ctx, buffer_kind, out_path, &mut document);
     }
+}
+
+/// Upper bound on how long to run JS timers while waiting for a reftest to be
+/// ready for its screenshot
+const REFTEST_TIMER_BUDGET: Duration = Duration::from_secs(1);
+
+/// Duration of an animation frame (`requestAnimationFrame` callbacks are
+/// scheduled this far in the future)
+const FRAME: Duration = Duration::from_millis(16);
+
+/// Run JS timers until the document is ready to be screenshotted, mirroring
+/// wptrunner's `test-wait.js`: wait two animation frames after load, and if the
+/// root element has the `reftest-wait` class, until that class is removed (and
+/// then another two frames). Styles are resolved between timer callbacks, as a
+/// browser would between frames.
+fn wait_for_screenshot_ready(document: &mut ScriptDocument) {
+    let mut settle_start = document.clock_now();
+    let mut waiting = false;
+    pump_timers(document, REFTEST_TIMER_BUDGET, |doc| {
+        let now = doc.clock_now();
+        {
+            let mut inner = doc.inner_mut();
+            inner.resolve(0.0);
+            if has_reftest_wait(&inner) {
+                waiting = true;
+                return None;
+            }
+        }
+        if waiting {
+            waiting = false;
+            settle_start = now;
+        }
+        let settle_deadline = settle_start + FRAME * 2;
+        doc.next_timer_deadline()
+            .is_none_or(|deadline| deadline > settle_deadline)
+            .then_some(())
+    });
+}
+
+fn has_reftest_wait(document: &BaseDocument) -> bool {
+    document
+        .try_root_element()
+        .and_then(|root| root.attr(blitz_dom::local_name!("class")))
+        .is_some_and(|class| class.split_ascii_whitespace().any(|c| c == "reftest-wait"))
 }
 
 fn render_document_to_buffer(
@@ -291,4 +351,39 @@ fn write_png<W: Write>(writer: W, buffer: &[u8], width: u32, height: u32) {
     let mut writer = encoder.write_header().unwrap();
     writer.write_image_data(buffer).unwrap();
     writer.finish().unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn references_receive_query_and_fragment_variants() {
+        let url = Url::parse("http://dummy.local/css/test.html?a=1#part").unwrap();
+        assert_eq!(
+            resolve_reference_url(&url, "ref.html").unwrap().as_str(),
+            "http://dummy.local/css/ref.html?a=1#part"
+        );
+        assert_eq!(
+            resolve_reference_url(&url, "/shared/ref.xhtml")
+                .unwrap()
+                .as_str(),
+            "http://dummy.local/shared/ref.xhtml?a=1#part"
+        );
+        assert_eq!(
+            resolve_reference_url(&url, "about:blank").unwrap().as_str(),
+            "about:blank?a=1#part"
+        );
+    }
+
+    #[test]
+    fn explicit_reference_queries_are_preserved() {
+        let url = Url::parse("http://dummy.local/css/test.html").unwrap();
+        let reference = resolve_reference_url(&url, "ref.html?mode=two#part").unwrap();
+        assert_eq!(
+            &reference[url::Position::BeforePath..],
+            "/css/ref.html?mode=two#part"
+        );
+        assert_eq!(reference.path(), "/css/ref.html");
+    }
 }

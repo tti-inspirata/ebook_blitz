@@ -154,3 +154,60 @@ fn spanned_cells_have_no_line_running_through_them() {
     // 行间线穿不过 rowspan=2 的那格,只在右边一列上有。
     assert_eq!(h_line(&borders, 1), vec![false, true]);
 }
+
+/// 表格 `id` 的 taffy 行轨道数。
+fn row_track_count(doc: &HtmlDocument, id: &str) -> usize {
+    let node_id = doc.query_selector(&format!("#{id}")).unwrap().unwrap();
+    let node = doc.tree().get(node_id).unwrap();
+    let SpecialElementData::TableRoot(table) = &node.element_data().unwrap().special_data else {
+        panic!("#{id} did not become a table root");
+    };
+    let grid_info = table.computed_grid_info.borrow();
+    grid_info.as_ref().unwrap().rows.positions.len()
+}
+
+#[test]
+fn rowspan_is_clamped_to_its_row_group() {
+    // 末行的 rowspan=3 越过表格末尾、表头的 rowspan=2 越过 <thead>:HTML 都截到行组末行。
+    // 不截的话越界部分生成隐式轨道,[线0, 行0, 线1, …] 的交错序列错位,整张表的线都画不出来;
+    // 跨行组的那格还会把下一组首行的单元格挤到右边一列。
+    const HTML: &str = r#"<html><body style="margin:0">
+        <table id="t" style="border-collapse:collapse">
+            <thead><tr>
+                <th rowspan="2" style="border:solid black 1pt">h</th>
+                <th style="border:solid black 1pt">h2</th>
+            </tr></thead>
+            <tbody>
+                <tr>
+                    <td style="border:solid black 1pt">a1</td>
+                    <td style="border:solid black 1pt">a2</td>
+                </tr>
+                <tr>
+                    <td rowspan="3" style="border:solid black 1pt">b1</td>
+                    <td style="border:solid black 1pt">b2</td>
+                </tr>
+            </tbody>
+        </table>
+    </body></html>"#;
+
+    let mut doc = HtmlDocument::from_html(
+        HTML,
+        DocumentConfig {
+            viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+            html_parser_provider: Some(Arc::new(HtmlProvider) as _),
+            ..Default::default()
+        },
+    );
+    doc.resolve(0.0);
+
+    let borders = collapsed_borders(&doc, "t");
+    assert_eq!((borders.n_rows, borders.n_cols), (3, 2));
+    assert_eq!(
+        row_track_count(&doc, "t"),
+        2 * 3 + 1,
+        "no implicit row tracks"
+    );
+    // 表头与表体之间的线两列都有:表头那格没有跨进表体。
+    assert_eq!(h_line(&borders, 1), vec![true, true]);
+    assert_eq!(h_line(&borders, 2), vec![true, true]);
+}

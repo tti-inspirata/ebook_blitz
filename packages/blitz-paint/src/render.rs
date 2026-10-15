@@ -82,24 +82,6 @@ impl<'a> PhysicalTracks<'a> {
     pub(crate) fn iter(self) -> impl ExactSizeIterator<Item = taffy::Line<f32>> + 'a {
         (0..self.positions.len()).map(move |index| self.get(index))
     }
-
-    /// The physical start position of the first track
-    pub(crate) fn origin(self) -> f32 {
-        if self.positions.is_empty() {
-            0.0
-        } else {
-            self.get(0).start
-        }
-    }
-
-    /// Total distance from the start of the first track to the end of the last track
-    pub(crate) fn span(self) -> f32 {
-        if self.positions.is_empty() {
-            0.0
-        } else {
-            self.get(self.positions.len() - 1).end - self.get(0).start
-        }
-    }
 }
 
 /// A short-lived struct which holds a bunch of parameters for rendering a scene so
@@ -428,6 +410,23 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             return;
         }
 
+        // Cull elements whose transformed geometry is not representable in f32 (e.g.
+        // `transform: scale(99e99)`): the renderer works in f32 and flattening such paths
+        // can attempt to allocate an unbounded number of line segments.
+        let f32_max = f64::from(f32::MAX);
+        if !screen_bbox.is_finite()
+            || [
+                screen_bbox.x0,
+                screen_bbox.y0,
+                screen_bbox.x1,
+                screen_bbox.y1,
+            ]
+            .iter()
+            .any(|c| c.abs() > f32_max)
+        {
+            return;
+        }
+
         // Optimise zero-area (/very small area) clips by not rendering at all
         let clip_area = content_box_size.width * content_box_size.height;
         let overflow_area =
@@ -482,6 +481,22 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         let default_clip = cx.frame.border_box_path();
         let mut clip_path_for_layer = clip_path_shape.unwrap_or(default_clip);
         clip_path_for_layer.apply_affine(Affine::scale(self.scale));
+
+        // CSS 2 `clip` property (absolutely positioned elements only). Applies to the whole of
+        // the element's rendering (including outlines and shadows), so it is the outermost layer.
+        let css_clip_rect = cx.css_clip_rect();
+        if css_clip_rect.is_some_and(|rect| rect.is_zero_area()) {
+            return;
+        }
+        let css_clip_layer_pushed = self.layer_manager.maybe_push_layer(
+            scene,
+            css_clip_rect.is_some(),
+            1.0,
+            cx.transform,
+            &css_clip_rect.unwrap_or(Rect::ZERO),
+            None,
+            None,
+        );
 
         cx.draw_outline(scene);
         cx.draw_outset_box_shadow(scene);
@@ -609,6 +624,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 cx.maybe_pop_css_mask_layer(scene, mask_layer_pushed);
             },
         );
+
+        self.layer_manager
+            .maybe_pop_layer(scene, css_clip_layer_pushed);
     }
 
     fn render_node(
@@ -669,7 +687,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             element,
             transform,
             #[cfg(feature = "svg")]
-            svg: element.svg_data(),
+            svg: match element.image_data() {
+                Some(blitz_dom::node::ImageData::Svg(svg)) => Some(svg),
+                _ => None,
+            },
             text_input: element.text_input_data(),
             list_item: element.list_item_data.as_deref(),
             devtools: self.dom.devtools(),
@@ -684,6 +705,13 @@ fn to_image_quality(image_rendering: ImageRendering) -> peniko::ImageQuality {
         ImageRendering::CrispEdges => peniko::ImageQuality::Low,
         ImageRendering::Pixelated => peniko::ImageQuality::Low,
     }
+}
+
+/// The transform from an SVG's rendered tree to a viewport of the given size.
+#[cfg(feature = "svg")]
+fn svg_viewport_affine(svg: &blitz_dom::node::SvgImageData, width: f32, height: f32) -> Affine {
+    let t = svg.viewport_transform(width, height);
+    Affine::new([t.sx, t.ky, t.kx, t.sy, t.tx, t.ty].map(f64::from))
 }
 
 /// Ensure that the `resized_image` field has a correctly sized image
@@ -715,7 +743,7 @@ struct ElementCx<'dom, 'a> {
     element: &'dom ElementData,
     transform: Affine,
     #[cfg(feature = "svg")]
-    svg: Option<&'dom usvg::Tree>,
+    svg: Option<&'dom blitz_dom::node::SvgImageData>,
     text_input: Option<&'dom TextInputData>,
     list_item: Option<&'dom ListItemLayout>,
     devtools: &'dom DevtoolSettings,
@@ -863,6 +891,10 @@ impl ElementCx<'_, '_> {
                     panic!("Tried to render node marked as inline root that does not have an inline layout: {:?}", self.node);
                 });
 
+            let pos = Point {
+                x: pos.x,
+                y: pos.y + text_layout.block_offset as f64,
+            };
             let transform =
                 self.transform * Affine::translate((pos.x * self.scale, pos.y * self.scale));
 
@@ -982,18 +1014,25 @@ impl ElementCx<'_, '_> {
                 Marker::Char(_) => 8.0,
                 Marker::String(_) => 0.0,
             };
-            let x_offset = -(layout.full_width() / layout.scale() + x_padding);
+            // Outside markers are placed outside the list item's border box
+            // (`pos` is the origin of its content box)
+            let item_layout = self.node.final_layout();
+            let x_offset = -(layout.full_width() / layout.scale()
+                + x_padding
+                + item_layout.padding.left
+                + item_layout.border.left);
 
             // Align the marker with the baseline of the first line of text in the list item
-            let y_offset = if let Some(first_text_line) = &self
+            let y_offset = if let Some((text_layout, first_text_line)) = &self
                 .element
                 .inline_layout_data
                 .as_ref()
-                .and_then(|text_layout| text_layout.layout.lines().next())
+                .and_then(|text_layout| Some((text_layout, text_layout.layout.lines().next()?)))
             {
                 (first_text_line.metrics().baseline
                     - layout.lines().next().unwrap().metrics().baseline)
                     / layout.scale()
+                    + text_layout.block_offset
             } else {
                 0.0
             };
@@ -1029,9 +1068,10 @@ impl ElementCx<'_, '_> {
 
         if let Some(hoisted) = &self.node.stacking_context {
             for hoisted_child in hoisted.neg_z_hoisted_children() {
+                let position = hoisted_child.position(self.node.tree(), self.node.id);
                 let pos = kurbo::Vec2 {
-                    x: hoisted_child.position.x as f64 * self.scale,
-                    y: hoisted_child.position.y as f64 * self.scale,
+                    x: position.x as f64 * self.scale,
+                    y: position.y as f64 * self.scale,
                 };
                 self.render_node(
                     scene,
@@ -1045,16 +1085,33 @@ impl ElementCx<'_, '_> {
         // Regular children
         if let Some(children) = &*self.node.paint_children.borrow() {
             for child_id in children {
-                self.render_node(scene, *child_id, parent_style_transform, clip_rect);
+                // Fixed-position children of the root element are positioned against
+                // the viewport and do not scroll with it, so cancel out the viewport
+                // scroll (applied in `paint_scene`). A fixed box contained by a
+                // transformed ancestor scrolls with it like any out-of-flow box.
+                let child = &self.context.dom.as_ref().tree()[*child_id];
+                let child_transform = if child.taffy_position() == taffy::Position::Fixed
+                    && Some(self.node.id) == self.context.root_element_id
+                {
+                    let scroll = self.context.dom.as_ref().viewport_scroll();
+                    parent_style_transform.pre_translate(kurbo::Vec2 {
+                        x: scroll.x * self.scale,
+                        y: scroll.y * self.scale,
+                    })
+                } else {
+                    parent_style_transform
+                };
+                self.render_node(scene, *child_id, child_transform, clip_rect);
             }
         }
 
         // Positive z_index hoisted nodes
         if let Some(hoisted) = &self.node.stacking_context {
             for hoisted_child in hoisted.pos_z_hoisted_children() {
+                let position = hoisted_child.position(self.node.tree(), self.node.id);
                 let pos = kurbo::Vec2 {
-                    x: hoisted_child.position.x as f64 * self.scale,
-                    y: hoisted_child.position.y as f64 * self.scale,
+                    x: position.x as f64 * self.scale,
+                    y: position.y as f64 * self.scale,
                 };
                 self.render_node(
                     scene,
@@ -1076,12 +1133,23 @@ impl ElementCx<'_, '_> {
 
         let width = self.frame.content_box.width() as f32;
         let height = self.frame.content_box.height() as f32;
-        let svg_size = svg.size();
+        let svg_size = svg.tree.size();
 
         let x = self.frame.content_box.origin().x;
         let y = self.frame.content_box.origin().y;
 
-        // let object_fit = self.style.clone_object_fit();
+        // An SVG with an aspect ratio but no natural size is sized by the default sizing
+        // algorithm, which for `none` and `scale-down` contains it within the content box.
+        let object_fit = match self.style.clone_object_fit() {
+            ObjectFit::None | ObjectFit::ScaleDown
+                if svg.intrinsic_width().is_none()
+                    && svg.intrinsic_height().is_none()
+                    && svg.viewbox_aspect_ratio().is_some() =>
+            {
+                ObjectFit::Contain
+            }
+            object_fit => object_fit,
+        };
         let object_position = self.style.clone_object_position();
 
         // Apply object-fit algorithm
@@ -1090,7 +1158,7 @@ impl ElementCx<'_, '_> {
             width: svg_size.width(),
             height: svg_size.height(),
         };
-        let paint_size = compute_object_fit(container_size, Some(object_size), ObjectFit::Contain);
+        let paint_size = compute_object_fit(container_size, Some(object_size), object_fit);
 
         // Compute object-position
         let x_offset = object_position.horizontal.resolve(
@@ -1102,15 +1170,46 @@ impl ElementCx<'_, '_> {
         let x = x + x_offset.px() as f64;
         let y = y + y_offset.px() as f64;
 
-        let x_scale = paint_size.width as f64 / object_size.width as f64;
-        let y_scale = paint_size.height as f64 / object_size.height as f64;
+        let viewport = svg_viewport_affine(svg, paint_size.width, paint_size.height);
+        let transform = (self.transform * viewport).then_translate(Vec2 { x, y });
 
-        let transform = self
-            .transform
-            .pre_scale_non_uniform(x_scale, y_scale)
-            .then_translate(Vec2 { x, y });
+        self.with_replaced_content_clip(
+            scene,
+            container_size,
+            paint_size,
+            x_offset.px(),
+            y_offset.px(),
+            |scene| {
+                anyrender_svg::render_svg_tree(scene, &svg.tree, transform);
+            },
+        );
+    }
 
-        anyrender_svg::render_svg_tree(scene, svg, transform);
+    /// Clip replaced content to the content box when its object-fit/object-position
+    /// rect overflows it.
+    fn with_replaced_content_clip<S: PaintScene>(
+        &self,
+        scene: &mut S,
+        container_size: taffy::Size<f32>,
+        paint_size: taffy::Size<f32>,
+        x_offset: f32,
+        y_offset: f32,
+        paint: impl FnOnce(&mut S),
+    ) {
+        let overflows = x_offset < 0.0
+            || y_offset < 0.0
+            || x_offset + paint_size.width > container_size.width
+            || y_offset + paint_size.height > container_size.height;
+        self.context.layer_manager.maybe_with_layer(
+            scene,
+            overflows,
+            1.0,
+            self.transform,
+            &self.frame.content_box_path(),
+            None,
+            None,
+            paint,
+        );
     }
 
     fn draw_image(&self, scene: &mut impl PaintScene) {
@@ -1150,7 +1249,16 @@ impl ElementCx<'_, '_> {
                 .pre_translate(Vec2 { x, y })
                 .pre_scale_non_uniform(x_scale, y_scale);
 
-            scene.draw_image(to_peniko_image(image, quality).as_ref(), transform);
+            self.with_replaced_content_clip(
+                scene,
+                container_size,
+                paint_size,
+                x_offset.px(),
+                y_offset.px(),
+                |scene| {
+                    scene.draw_image(to_peniko_image(image, quality).as_ref(), transform);
+                },
+            );
         }
     }
 
@@ -1246,11 +1354,30 @@ fn create_css_rect(style: &ComputedValues, layout: &Layout, scale: f64) -> CssBo
         }
     };
     let s_border = style.get_border();
-    let border_radii = NonUniformRoundedRectRadii {
-        top_left: resolve_radii(&s_border.border_top_left_radius),
-        top_right: resolve_radii(&s_border.border_top_right_radius),
-        bottom_right: resolve_radii(&s_border.border_bottom_right_radius),
-        bottom_left: resolve_radii(&s_border.border_bottom_left_radius),
+    // border-radius 不作用于 collapse 模式下的表格及表格内部元素(CSS Backgrounds 3 §5.3):
+    // 合并边线是直角的,圆角只会把背景和裁剪切圆,在角上与直角网格线之间留出空隙。
+    let display = style.clone_display();
+    let is_collapsed_table_part = style.clone_border_collapse() == BorderCollapse::Collapse
+        && matches!(
+            display.inside(),
+            DisplayInside::Table
+                | DisplayInside::TableRowGroup
+                | DisplayInside::TableHeaderGroup
+                | DisplayInside::TableFooterGroup
+                | DisplayInside::TableRow
+                | DisplayInside::TableCell
+                | DisplayInside::TableColumnGroup
+                | DisplayInside::TableColumn
+        );
+    let border_radii = if is_collapsed_table_part {
+        NonUniformRoundedRectRadii::default()
+    } else {
+        NonUniformRoundedRectRadii {
+            top_left: resolve_radii(&s_border.border_top_left_radius),
+            top_right: resolve_radii(&s_border.border_top_right_radius),
+            bottom_right: resolve_radii(&s_border.border_bottom_right_radius),
+            bottom_left: resolve_radii(&s_border.border_bottom_left_radius),
+        }
     };
 
     CssBox::new(border_box, border, padding, outline_width, border_radii)

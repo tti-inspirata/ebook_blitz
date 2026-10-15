@@ -1,5 +1,5 @@
 use blitz_traits::node_id::NodeId;
-use cssparser::ParserInput;
+use cssparser::Parser;
 use kurbo::{Affine, Rect as KurboRect};
 use linebender_resource_handle::Blob;
 use markup5ever::{LocalName, QualName, local_name};
@@ -105,9 +105,10 @@ pub struct ElementData {
     pub before: Option<NodeId>,
     pub after: Option<NodeId>,
 
-    /// Detailed grid track sizing information from the most recent layout
-    /// (grid containers only). Used by devtools grid inspection.
-    pub detailed_grid_info: Option<Box<taffy::DetailedGridInfo<Atom>>>,
+    /// Detailed layout information from the most recent layout (currently
+    /// grid track sizing information for grid containers only). Used by
+    /// devtools grid inspection and out-of-flow grid-area positioning.
+    pub detailed_layout_info: taffy::DetailedLayoutInfo<Atom>,
 
     // Taffy layout data:
     pub display_constructed_as: StyloDisplay,
@@ -128,6 +129,10 @@ pub struct LayoutData {
     pub final_layout: Layout,
     pub scroll_offset: crate::Point<f64>,
     pub scrollable_overflow: KurboRect,
+    /// The writing mode this node's layout algorithm ran in (the root takes it from `<body>`),
+    /// recorded by the layout pass for CSSOM geometry lookups.
+    #[cfg(feature = "writing-mode")]
+    pub writing_mode: stylo_taffy::WritingMode,
 }
 
 impl LayoutData {
@@ -138,6 +143,8 @@ impl LayoutData {
             final_layout: Layout::new(),
             scroll_offset: crate::Point::ZERO,
             scrollable_overflow: KurboRect::ZERO,
+            #[cfg(feature = "writing-mode")]
+            writing_mode: stylo_taffy::WritingMode::empty(),
         }
     }
 }
@@ -314,7 +321,7 @@ impl Clone for ElementData {
             damaged_descendants: AtomicBool::new(true),
             before: None,
             after: None,
-            detailed_grid_info: None,
+            detailed_layout_info: taffy::DetailedLayoutInfo::None,
             display_constructed_as: StyloDisplay::Block,
             layout_data: None,
             transform: None,
@@ -421,7 +428,7 @@ impl ElementData {
             damaged_descendants: AtomicBool::new(true),
             before: None,
             after: None,
-            detailed_grid_info: None,
+            detailed_layout_info: taffy::DetailedLayoutInfo::None,
             display_constructed_as: StyloDisplay::Block,
             layout_data: None,
             transform: None,
@@ -695,8 +702,7 @@ impl ElementData {
             return false;
         };
         let mut source_property_declaration = SourcePropertyDeclaration::default();
-        let mut input = ParserInput::new(value);
-        let mut parser = style::values::Parser::new(&mut input);
+        let mut parser = Parser::new(value);
         let Ok(_) = PropertyDeclaration::parse_into(
             &mut source_property_declaration,
             property_id,
@@ -802,6 +808,14 @@ impl ElementData {
 
     pub fn take_inline_layout(&mut self) -> Option<Box<TextLayout>> {
         std::mem::take(&mut self.inline_layout_data)
+    }
+
+    pub(crate) fn is_button_input(&self) -> bool {
+        self.name.local == local_name!("input")
+            && matches!(
+                self.attr(local_name!("type")),
+                Some("button" | "submit" | "reset")
+            )
     }
 
     pub fn is_submit_button(&self) -> bool {

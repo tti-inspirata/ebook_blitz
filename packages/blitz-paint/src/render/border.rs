@@ -470,7 +470,7 @@ impl BorderPainter<'_> {
             .with_caps(Cap::Butt)
             .with_dashes(0.0, [dash, gap]);
         let clip = self.frame.border_edge_shape(edge);
-        scene.push_clip_layer(self.transform, &clip);
+        scene.push_clip_layer(Fill::NonZero, self.transform, &clip);
         scene.stroke(&stroke, self.transform, color, None, &centerline);
         scene.pop_layer();
     }
@@ -543,9 +543,50 @@ impl BorderPainter<'_> {
         }
 
         let clip = self.frame.border_edge_shape(edge);
-        scene.push_clip_layer(self.transform, &clip);
+        scene.push_clip_layer(Fill::NonZero, self.transform, &clip);
         scene.fill(Fill::NonZero, self.transform, color, None, &path);
         scene.pop_layer();
+    }
+}
+
+/// 把 collapse 表格的网格坐标(相对表格 border-box、未取整)按 taffy `round_layout` 的规则取整。
+///
+/// taffy 按**绝对坐标**取整:子盒的位置是 `round(祖先累计 + 自身) - round(祖先累计)`。外圈
+/// gutter 轨道只有半条线宽(1px 边框即 0.5px),单元格因此落在小数位置上,取整到哪一侧取决于
+/// 表格自身绝对位置的小数部分。网格线若直接按未取整的轨道位置画,就会和单元格背景错开最多
+/// 1px(表格上方内容的行高一变,错位方向也跟着翻)。这里用与 taffy 相同的累计坐标取整,线与
+/// 单元格的边永远落在同一像素上。
+#[derive(Clone, Copy)]
+pub(crate) struct GridSnap {
+    /// 表格 border-box 未取整的累计绝对坐标(与 taffy 取整时用的 cumulative 一致)。
+    x: f32,
+    y: f32,
+}
+
+impl GridSnap {
+    pub(crate) fn new(node: &blitz_dom::Node) -> Self {
+        let (mut x, mut y) = (0.0f32, 0.0f32);
+        let mut current = node;
+        loop {
+            let location = current.unrounded_layout().location;
+            x += location.x;
+            y += location.y;
+            match current.containing_block() {
+                Some(id) => current = current.with(id),
+                None => break,
+            }
+        }
+        Self { x, y }
+    }
+
+    /// 横向网格坐标取整后的值(CSS px,相对表格 border-box)。
+    pub(crate) fn x(self, pos: f32) -> f64 {
+        ((self.x + pos).round() - self.x.round()) as f64
+    }
+
+    /// 纵向网格坐标取整后的值(CSS px,相对表格 border-box)。
+    pub(crate) fn y(self, pos: f32) -> f64 {
+        ((self.y + pos).round() - self.y.round()) as f64
     }
 }
 
@@ -582,35 +623,37 @@ impl ElementCx<'_, '_> {
             return;
         }
 
-        // 网格位于表格 content-box 内(collapse 下表格自身的 border 已并入最外圈线,
-        // 布局把 style.border 归零),绘制原点平移到 content-box。
-        let content_origin = self.frame.content_box.origin();
-        let transform = self.transform * Affine::translate((content_origin.x, content_origin.y));
-        let origin = (cols.origin() as f64, rows.origin() as f64);
+        // 轨道位置相对表格 border-box(与单元格的 `location` 同一坐标系),按 taffy 的取整
+        // 规则取整后再画,线与单元格的边才不会错开(见 `GridSnap`)。注意不能以
+        // `frame.content_box` 为原点:collapse 下网格不让出表格自身的 border,而布局结果里的
+        // border 仍是按样式算的宽度。
+        let transform = self.transform;
+        let snap = GridSnap::new(self.node);
 
         // 线 k 的 gutter 轨道:水平线 k 是行轨道 2k,垂直线 k 是列轨道 2k。
         let h_track = |line: usize| -> (f64, f64) {
             let track = row_pos[2 * line];
-            (track.start as f64 - origin.1, track.end as f64 - origin.1)
+            (snap.y(track.start), snap.y(track.end))
         };
         let v_track = |line: usize| -> (f64, f64) {
             let track = col_pos[2 * line];
-            (track.start as f64 - origin.0, track.end as f64 - origin.0)
+            (snap.x(track.start), snap.x(track.end))
         };
         // 表格 overflow 非 visible 时,溢出 border-box 的那半条外圈线被裁掉
-        // (与 Chrome/Safari 一致)。collapse 下 taffy border 为 0,border-box 的边缘
-        // 就是 content-box 的边缘,也就是最外圈 gutter 轨道的外侧。
+        // (与 Chrome/Safari 一致)。
         let box_styles = self.style.get_box();
         let clips_overflow = !matches!(box_styles.overflow_x, Overflow::Visible)
             || !matches!(box_styles.overflow_y, Overflow::Visible);
 
-        // 线段在它那条 gutter 轨道里的位置。内部线以轨道中心为中心;最外圈的线只占半个
-        // 轨道,中心落在 content-box 边缘,另一半探到表格外面。
+        // 线段在它那条 gutter 轨道里的位置。内部线以轨道中心为中心。最外圈的线只有内侧
+        // 一半在表格里:那一半贴着单元格的边(外圈轨道的内侧),另一半探到表格外面。以单元格
+        // 的边而不是轨道外沿为基准:外圈轨道只有半条线宽,取整后可能为 0,以外沿为基准会让
+        // 线压进单元格、被单元格背景盖住。
         let place = |(start, end): (f64, f64), width: f64, line: usize, last: usize| {
             let (lo, hi) = if line == 0 {
-                (end - width / 2.0, end + width / 2.0)
+                (end - width, end)
             } else if line == last {
-                (start - width / 2.0, start + width / 2.0)
+                (start, start + width)
             } else {
                 let center = (start + end) / 2.0;
                 (center - width / 2.0, center + width / 2.0)
@@ -618,11 +661,11 @@ impl ElementCx<'_, '_> {
             if !clips_overflow {
                 return (lo, hi);
             }
-            // 裁到 content-box 内侧:首线不能越过它的轨道起点,末线不能越过轨道终点。
+            // 只留内侧那一半。
             if line == 0 {
-                (lo.max(start), hi)
+                (lo.max(end - width / 2.0), hi)
             } else if line == last {
-                (lo, hi.min(end))
+                (lo, hi.min(start + width / 2.0))
             } else {
                 (lo, hi)
             }

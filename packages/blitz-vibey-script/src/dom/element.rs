@@ -45,6 +45,8 @@ pub(crate) fn init_element_proto(proto: &JsObject, context: &mut Context) {
         context,
     );
     define_accessor(proto, "hidden", Some(get_hidden), Some(set_hidden), context);
+    define_accessor(proto, "width", Some(get_width), Some(set_width), context);
+    define_accessor(proto, "height", Some(get_height), Some(set_height), context);
     define_accessor(
         proto,
         "selectionStart",
@@ -75,7 +77,15 @@ pub(crate) fn init_element_proto(proto: &JsObject, context: &mut Context) {
         Some(set_autofocus),
         context,
     );
-    define_accessor(proto, "style", Some(get_style), None, context);
+    // `style` is `[PutForwards=cssText]`: assignment sets `style.cssText`
+    define_accessor(
+        proto,
+        "style",
+        Some(get_style),
+        Some(super::style::set_css_text),
+        context,
+    );
+    define_accessor(proto, "sheet", Some(get_sheet), None, context);
     define_accessor(
         proto,
         "innerHTML",
@@ -84,6 +94,16 @@ pub(crate) fn init_element_proto(proto: &JsObject, context: &mut Context) {
         context,
     );
     define_accessor(proto, "outerHTML", Some(get_outer_html), None, context);
+    // The setter is approximated with `textContent` semantics (no `<br>` insertion)
+    define_accessor(
+        proto,
+        "innerText",
+        Some(get_inner_text),
+        Some(super::node::set_text_content),
+        context,
+    );
+    // The `outerText` getter is the same as `innerText`'s
+    define_accessor(proto, "outerText", Some(get_inner_text), None, context);
     define_accessor(proto, "content", Some(get_content), None, context);
     define_accessor(proto, "children", Some(children), None, context);
     define_accessor(
@@ -196,7 +216,7 @@ pub(crate) fn init_element_proto(proto: &JsObject, context: &mut Context) {
 
 // === Attribute helpers ===
 
-fn read_attr(ctx: &DomCtx, node_id: NodeId, name: &str) -> Option<String> {
+pub(crate) fn read_attr(ctx: &DomCtx, node_id: NodeId, name: &str) -> Option<String> {
     let doc = ctx.doc.borrow();
     let node = doc.get_node(node_id)?;
     let element = node.element_data()?;
@@ -207,7 +227,7 @@ fn read_attr(ctx: &DomCtx, node_id: NodeId, name: &str) -> Option<String> {
         .map(|attr| attr.value.clone())
 }
 
-fn write_attr(ctx: &DomCtx, node_id: NodeId, name: &str, value: &str) {
+pub(crate) fn write_attr(ctx: &DomCtx, node_id: NodeId, name: &str, value: &str) {
     let mut doc = ctx.doc.borrow_mut();
     doc.mutate().set_attribute(node_id, attr_name(name), value);
 }
@@ -290,7 +310,7 @@ pub(crate) fn element_child_ids(doc: &blitz_dom::BaseDocument, node_id: NodeId) 
         .unwrap_or_default()
 }
 
-fn children(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn children(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let ctx = dom_ctx(context)?;
     let node_id = this_node_id(this)?;
     let child_ids = element_child_ids(&ctx.doc.borrow(), node_id);
@@ -464,7 +484,6 @@ fn set_autofocus(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let node_id = this_node_id(this)?;
     let value = args.first().map(JsValue::to_boolean).unwrap_or(false);
     if value {
-        // blitz-dom's autofocus handling expects the value "true"
         write_attr(&ctx, node_id, "autofocus", "true");
     } else {
         clear_attr(&ctx, node_id, "autofocus");
@@ -528,9 +547,19 @@ fn set_checked(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     Ok(JsValue::undefined())
 }
 
+/// `HTMLStyleElement.disabled` / `HTMLLinkElement.disabled` control the
+/// disabled flag of the element's associated stylesheet rather than (only) a
+/// content attribute.
+fn is_stylesheet_owner_tag(tag: &LocalName) -> bool {
+    matches!(&**tag, "style" | "link")
+}
+
 fn get_disabled(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let ctx = dom_ctx(context)?;
     let node_id = this_node_id(this)?;
+    if element_local_name(&ctx, node_id).is_some_and(|tag| is_stylesheet_owner_tag(&tag)) {
+        return Ok(JsValue::from(ctx.doc.borrow().stylesheet_disabled(node_id)));
+    }
     Ok(JsValue::from(
         read_attr(&ctx, node_id, "disabled").is_some(),
     ))
@@ -540,6 +569,16 @@ fn set_disabled(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     let ctx = dom_ctx(context)?;
     let node_id = this_node_id(this)?;
     let disabled = args.first().map(JsValue::to_boolean).unwrap_or(false);
+    if let Some(tag) = element_local_name(&ctx, node_id) {
+        if is_stylesheet_owner_tag(&tag) {
+            ctx.doc
+                .borrow_mut()
+                .set_stylesheet_disabled(node_id, disabled);
+            if &*tag == "style" {
+                return Ok(JsValue::undefined());
+            }
+        }
+    }
     if disabled {
         write_attr(&ctx, node_id, "disabled", "");
     } else {
@@ -564,6 +603,109 @@ fn set_hidden(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
         clear_attr(&ctx, node_id, "hidden");
     }
     Ok(JsValue::undefined())
+}
+
+// === `width`/`height` (`unsigned long` reflected content attributes) ===
+//
+// Only the elements whose `width`/`height` content attributes are reflected as
+// numbers by their IDL interface (`HTMLCanvasElement`, `HTMLImageElement`, ...)
+// get the reflected property. A canvas defaults to its 300x150 bitmap size.
+
+fn element_local_name(ctx: &DomCtx, node_id: NodeId) -> Option<LocalName> {
+    let doc = ctx.doc.borrow();
+    let element = doc.get_node(node_id)?.element_data()?;
+    Some(element.name.local.clone())
+}
+
+fn dimension_attr_default(tag: &LocalName, attr: &str) -> Option<u32> {
+    match &**tag {
+        "canvas" => Some(if attr == "width" { 300 } else { 150 }),
+        "img" | "video" | "iframe" | "embed" | "object" => Some(0),
+        _ => None,
+    }
+}
+
+/// Parse a reflected `unsigned long` content attribute (HTML "rules for parsing
+/// non-negative integers"), falling back to `default` on a missing/invalid value
+fn parse_unsigned_long_attr(value: Option<String>, default: u32) -> u32 {
+    value
+        .as_deref()
+        .map(str::trim)
+        .and_then(|value| {
+            let value = value.strip_prefix('+').unwrap_or(value);
+            let digits: &str = value
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap_or("");
+            digits.parse::<u32>().ok()
+        })
+        .filter(|value| *value <= 2147483647)
+        .unwrap_or(default)
+}
+
+fn dimension_getter(attr: &str, this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
+    let ctx = dom_ctx(context)?;
+    let node_id = this_node_id(this)?;
+    let Some(tag) = element_local_name(&ctx, node_id) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(default) = dimension_attr_default(&tag, attr) else {
+        return Ok(JsValue::undefined());
+    };
+    let value = parse_unsigned_long_attr(read_attr(&ctx, node_id, attr), default);
+    Ok(JsValue::from(value))
+}
+
+fn dimension_setter(
+    attr: &str,
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let ctx = dom_ctx(context)?;
+    let node_id = this_node_id(this)?;
+    let Some(tag) = element_local_name(&ctx, node_id) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(default) = dimension_attr_default(&tag, attr) else {
+        // Not a reflected attribute on this element: behave like a plain
+        // expando property so `div.width = x` still round-trips.
+        if let Some(obj) = this.as_object() {
+            obj.create_data_property_or_throw(
+                boa_engine::JsString::from(attr),
+                args.first().cloned().unwrap_or_default(),
+                context,
+            )?;
+        }
+        return Ok(JsValue::undefined());
+    };
+    // WebIDL `unsigned long` conversion: ToNumber, then modulo 2^32; values
+    // outside the (0, 2^31) range fall back to the default
+    let number = args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_number(context)?;
+    let value = if number.is_finite() {
+        let value = number.trunc().rem_euclid(4294967296.0) as u32;
+        if value > 2147483647 { default } else { value }
+    } else {
+        0
+    };
+    write_attr(&ctx, node_id, attr, &value.to_string());
+    Ok(JsValue::undefined())
+}
+
+fn get_width(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    dimension_getter("width", this, context)
+}
+fn set_width(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    dimension_setter("width", this, args, context)
+}
+fn get_height(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    dimension_getter("height", this, context)
+}
+fn set_height(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    dimension_setter("height", this, args, context)
 }
 
 // === Text input selection (`selectionStart`/`selectionEnd`) ===
@@ -617,6 +759,18 @@ fn set_selection_utf16_range(
         let end_byte = utf16_to_byte(&text, start.max(end));
         driver.select_byte_range(start_byte, end_byte);
     });
+}
+
+fn get_inner_text(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let ctx = dom_ctx(context)?;
+    let node_id = this_node_id(this)?;
+    let mut doc = ctx.doc.borrow_mut();
+    doc.resolve(0.0);
+    let text = doc
+        .get_node(node_id)
+        .map(crate::inner_text::inner_text)
+        .unwrap_or_default();
+    Ok(js_str(&text))
 }
 
 fn get_selection_start(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -710,6 +864,22 @@ fn get_style(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<J
     let proto = ctx.state.borrow().protos().style.clone();
     let obj = JsObject::from_proto_and_data(Some(proto), super::NodeRef { node_id });
     Ok(super::wrap_style_object(obj, context))
+}
+
+/// `HTMLStyleElement.sheet` / `HTMLLinkElement.sheet`: the `CSSStyleSheet`
+/// object (built by the JS bootstrap) for the element's stylesheet, or `null`
+fn get_sheet(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    this_node_id(this)?;
+    let sheet = super::call_js_helper(
+        "__blitz_sheet_for_node",
+        std::slice::from_ref(this),
+        context,
+    )?;
+    Ok(if sheet.is_undefined() {
+        JsValue::null()
+    } else {
+        sheet
+    })
 }
 
 // === innerHTML / outerHTML ===
@@ -811,34 +981,84 @@ fn layout_value(
     Ok(JsValue::from(value as f64))
 }
 
+/// `offsetLeft`/`offsetTop`/`offsetWidth`/`offsetHeight`: the node's border box
+/// relative to the padding edge of its `offsetParent` (blitz-dom's `offset_rect`
+/// implements the offsetParent resolution and the fragment bounding box of
+/// non-atomic inline elements)
+fn offset_value(
+    this: &JsValue,
+    context: &mut Context,
+    f: impl FnOnce(&blitz_dom::BoundingRect) -> f64,
+) -> JsResult<JsValue> {
+    let ctx = dom_ctx(context)?;
+    let node_id = this_node_id(this)?;
+    let mut doc = ctx.doc.borrow_mut();
+    doc.resolve(0.0);
+    let value = doc.offset_rect(node_id).map(|rect| f(&rect)).unwrap_or(0.0);
+    Ok(JsValue::from(value.round()))
+}
+
 fn offset_width(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    layout_value(this, context, |node| node.final_layout().size.width.round())
+    offset_value(this, context, |rect| rect.width)
 }
 
 fn offset_height(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    layout_value(this, context, |node| {
-        node.final_layout().size.height.round()
-    })
+    offset_value(this, context, |rect| rect.height)
 }
 
-// `offsetLeft`/`offsetTop`: the position of the element's border edge relative
-// to the padding edge of its `offsetParent` (blitz-dom's `offset_top_left`
-// implements the offsetParent resolution)
-
 fn offset_left(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    layout_value(this, context, |node| node.offset_top_left().x.round())
+    offset_value(this, context, |rect| rect.x)
 }
 
 fn offset_top(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    layout_value(this, context, |node| node.offset_top_left().y.round())
+    offset_value(this, context, |rect| rect.y)
+}
+
+/// `clientWidth`/`clientHeight`. For the root element (in no-quirks mode, which
+/// is all Blitz supports) these are the viewport dimensions minus scrollbars.
+fn client_size(
+    this: &JsValue,
+    context: &mut Context,
+    axis: impl FnOnce(&blitz_dom::Node) -> f32,
+    viewport_axis: impl FnOnce(&blitz_dom::Node, (f32, f32)) -> f32,
+) -> JsResult<JsValue> {
+    let ctx = dom_ctx(context)?;
+    let node_id = this_node_id(this)?;
+    let mut doc = ctx.doc.borrow_mut();
+    doc.resolve(0.0);
+    let Some(node) = doc.get_node(node_id) else {
+        return Ok(JsValue::from(0.0));
+    };
+    let value = if node_id == doc.root_element().id {
+        let viewport = doc.viewport();
+        let scale = viewport.scale();
+        let size = (
+            viewport.window_size.0 as f32 / scale,
+            viewport.window_size.1 as f32 / scale,
+        );
+        viewport_axis(node, size)
+    } else {
+        axis(node)
+    };
+    Ok(JsValue::from(value.round() as f64))
 }
 
 fn client_width(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    layout_value(this, context, |node| node.client_width().round())
+    client_size(
+        this,
+        context,
+        |node| node.client_width(),
+        |node, (w, _)| w - node.final_layout().scrollbar_size.width,
+    )
 }
 
 fn client_height(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    layout_value(this, context, |node| node.client_height().round())
+    client_size(
+        this,
+        context,
+        |node| node.client_height(),
+        |node, (_, h)| h - node.final_layout().scrollbar_size.height,
+    )
 }
 
 fn scroll_width(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

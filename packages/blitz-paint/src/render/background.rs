@@ -1,12 +1,14 @@
+use super::border::GridSnap;
 use super::{ElementCx, PhysicalTracks, to_image_quality, to_peniko_image};
 use crate::color::{Color, ToColorColor};
 use crate::gradient::to_peniko_gradient;
 use anyrender::PaintScene;
+use blitz_dom::NodeId;
 use blitz_dom::node::{ImageData, ImageResourceData, SpecialElementData};
 use kurbo::{self, Affine, BezPath, Point, Rect, Shape, Size, Vec2};
 use peniko::{self, Fill};
-use style::computed_values::border_collapse::T as BorderCollapse;
 use style::{
+    computed_values::border_collapse::T as BorderCollapse,
     properties::{
         generated::longhands::{
             background_attachment::single_value::computed_value::T as StyloBackgroundAttachment,
@@ -220,52 +222,116 @@ impl ElementCx<'_, '_> {
         }
     }
 
+    /// Paint the backgrounds of the table's column groups, columns, row groups and rows
+    /// (in that order, bottom to top: CSS 2.1 §17.5.1).
+    ///
+    /// These backgrounds are only painted behind the table's cells (not in the
+    /// `border-spacing` between them, nor where a row has no cell), so they are
+    /// painted cell by cell.
     pub(super) fn draw_table_row_backgrounds(&self, scene: &mut impl PaintScene) {
         let SpecialElementData::TableRoot(table) = &self.element.special_data else {
             return;
         };
-        let Some(grid_info) = &mut *table.computed_grid_info.borrow_mut() else {
-            return;
-        };
 
-        // 网格位于表格 content-box 内,绘制原点需平移到 content-box,
-        // 否则行背景会相对单元格内容偏移(同 draw_table_borders)。
-        let content_origin = self.frame.content_box.origin();
-        let transform = self.transform
-            * kurbo::Affine::translate((content_origin.x, content_origin.y));
-
-        let cols = PhysicalTracks::from_tracks(&grid_info.columns);
-        let inner_width = cols.span() as f64;
-
-        let rows = PhysicalTracks::from_tracks(&grid_info.rows);
-        let row_origin = rows.origin();
-        // collapse 下轨道序列是 [线0, 行0, 线1, …](见 layout::table),行 r 落在
-        // 轨道 2r+1;separate 下没有 gutter 轨道,行 r 就是轨道 r。
-        let interleaved = table.border_collapse == BorderCollapse::Collapse;
-        let row_positions: Vec<taffy::Line<f32>> = rows.iter().collect();
-        for (index, row) in table.rows.iter().enumerate() {
-            let track = if interleaved { 2 * index + 1 } else { index };
-            let Some(row_position) = row_positions.get(track).copied() else {
-                continue;
-            };
-            let row_node = &self.context.dom.get_node(row.node_id).unwrap();
-            let Some(style) = row_node.primary_styles() else {
-                continue;
-            };
-
-            let y = (row_position.start - row_origin) as f64;
-            let height = (row_position.end - row_position.start) as f64;
-            let shape = Rect::new(0.0, y, inner_width, y + height).scale_from_origin(self.scale);
-
+        let background_color = |node_id: NodeId| -> Option<Color> {
+            let node = self.context.dom.get_node(node_id)?;
+            let style = node.primary_styles()?;
             let current_color = style.clone_color();
-            let background_color = &style.get_background().background_color;
-            let bg_color = background_color
+            let color = style
+                .get_background()
+                .background_color
                 .resolve_to_absolute(&current_color)
                 .as_srgb_color();
+            (color != Color::TRANSPARENT).then_some(color)
+        };
 
-            if bg_color != Color::TRANSPARENT {
-                // Fill the color
-                scene.fill(Fill::NonZero, transform, bg_color, None, &shape);
+        // Resolve the (group, track) background colors once per track rather than once per cell
+        let column_colors: Vec<[Option<Color>; 2]> = table
+            .columns
+            .iter()
+            .map(|col| {
+                [
+                    col.group.and_then(background_color),
+                    background_color(col.node_id),
+                ]
+            })
+            .collect();
+        let row_colors: Vec<[Option<Color>; 2]> = table
+            .rows
+            .iter()
+            .map(|row| {
+                [
+                    row.group.and_then(background_color),
+                    background_color(row.node_id),
+                ]
+            })
+            .collect();
+        let has_color =
+            |colors: &[[Option<Color>; 2]]| colors.iter().flatten().any(Option::is_some);
+        if !has_color(&column_colors) && !has_color(&row_colors) {
+            return;
+        }
+
+        let cell_rect = |cell_id: NodeId| -> Option<Rect> {
+            let layout = self.context.dom.get_node(cell_id)?.final_layout();
+            Some(Rect::new(
+                layout.location.x as f64,
+                layout.location.y as f64,
+                (layout.location.x + layout.size.width) as f64,
+                (layout.location.y + layout.size.height) as f64,
+            ))
+        };
+
+        // In the collapsed borders model the borders are laid out as gutter tracks between
+        // and around the cells (see `layout::table`), but a cell's border box (and so its
+        // background) extends to the middle of the borders around it. An inner gutter is
+        // split on a whole pixel so that the backgrounds of adjacent cells tile exactly;
+        // an outer gutter only holds the inner half of its line, so it goes to the cell whole.
+        // Gutter edges are rounded exactly as Taffy rounded the cells (see `GridSnap`), so the
+        // backgrounds line up with both the cells and the grid lines.
+        let collapsed = table.border_collapse == BorderCollapse::Collapse;
+        let borders = &table.collapsed_borders;
+        let grid_info = table.computed_grid_info.borrow();
+        let edges = if collapsed && let Some(grid_info) = grid_info.as_ref() {
+            let snap = GridSnap::new(self.node);
+            gutter_edges(&grid_info.columns, borders.n_cols, |p| snap.x(p)).zip(gutter_edges(
+                &grid_info.rows,
+                borders.n_rows,
+                |p| snap.y(p),
+            ))
+        } else {
+            None
+        };
+
+        for cell in &table.cells {
+            let no_colors = [None, None];
+            let column = column_colors
+                .get(cell.column as usize)
+                .unwrap_or(&no_colors);
+            let row = row_colors.get(cell.row as usize).unwrap_or(&no_colors);
+            let mut colors = column.iter().chain(row).flatten().peekable();
+            if colors.peek().is_none() {
+                continue;
+            }
+            let Some(mut rect) = cell_rect(cell.node_id) else {
+                continue;
+            };
+            if let Some((col_edges, row_edges)) = &edges {
+                let (n_rows, n_cols) = (borders.n_rows, borders.n_cols);
+                let (col0, row0) = (cell.column as usize, cell.row as usize);
+                let col1 = (col0 + cell.colspan as usize).min(n_cols);
+                let row1 = (row0 + cell.rowspan as usize).min(n_rows);
+                rect = Rect::new(
+                    col_edges[col0],
+                    row_edges[row0],
+                    col_edges[col1],
+                    row_edges[row1],
+                );
+            }
+
+            let shape = rect.scale_from_origin(self.scale);
+            for color in colors {
+                scene.fill(Fill::NonZero, self.transform, *color, None, &shape);
             }
         }
     }
@@ -330,8 +396,6 @@ impl ElementCx<'_, '_> {
 
     #[cfg(feature = "svg")]
     fn draw_svg_image_layer(&self, scene: &mut impl PaintScene, layer: &ImageLayerStyles) {
-        use kurbo::Affine;
-
         let Some(bg_image) = layer.image_data else {
             return;
         };
@@ -352,8 +416,6 @@ impl ElementCx<'_, '_> {
 
         let frame_w = (origin_rect.width() / self.scale) as f32;
         let frame_h = (origin_rect.height() / self.scale) as f32;
-
-        let svg_size = svg.tree.size();
 
         // Size the SVG per the CSS default sizing algorithm
         // (https://drafts.csswg.org/css-images/#default-sizing). An SVG image
@@ -383,8 +445,11 @@ impl ElementCx<'_, '_> {
             return;
         }
 
-        let x_ratio = (bg_size.width / svg_size.width() as f64) * self.scale;
-        let y_ratio = (bg_size.height / svg_size.height() as f64) * self.scale;
+        let viewport = super::svg_viewport_affine(
+            svg,
+            (bg_size.width * self.scale) as f32,
+            (bg_size.height * self.scale) as f32,
+        );
 
         let bg_pos = compute_layer_position(
             layer,
@@ -397,7 +462,7 @@ impl ElementCx<'_, '_> {
                 origin_rect.x0 + bg_pos.x * self.scale,
                 origin_rect.y0 + bg_pos.y * self.scale,
             ))
-            * Affine::scale_non_uniform(x_ratio, y_ratio);
+            * viewport;
 
         anyrender_svg::render_svg_tree(scene, &svg.tree, transform);
     }
@@ -912,4 +977,33 @@ fn extend(offset: f64, length: f64) -> f64 {
     } else {
         -extend_length
     }
+}
+
+/// For each grid line `k` (`k ∈ 0..=n`) of a collapsed table, the edge a cell background
+/// extends to: the outer edge of an outer gutter, the whole-pixel middle of an inner one.
+/// `None` if the tracks are not the interleaved `[line, track, line, …]` sequence.
+fn gutter_edges<S: taffy::CheapCloneStr>(
+    tracks: &taffy::DetailedGridTracksInfo<S>,
+    n: usize,
+    snap: impl Fn(f32) -> f64,
+) -> Option<Vec<f64>> {
+    let positions: Vec<taffy::Line<f32>> = PhysicalTracks::from_tracks(tracks).iter().collect();
+    if positions.len() != 2 * n + 1 {
+        return None;
+    }
+    Some(
+        (0..=n)
+            .map(|line| {
+                let track = positions[2 * line];
+                let (start, end) = (snap(track.start), snap(track.end));
+                if line == 0 {
+                    start
+                } else if line == n {
+                    end
+                } else {
+                    start + ((end - start) / 2.0).floor()
+                }
+            })
+            .collect(),
+    )
 }

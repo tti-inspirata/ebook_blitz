@@ -107,6 +107,28 @@ impl MutationWriter<'_> {
         self.state.stack.push(node_id);
     }
 
+    /// Remove a node from the document and drop it along with all of its descendants.
+    ///
+    /// The mappings of every dropped node are cleared to prevent them dangling.
+    fn remove_and_drop_node(&mut self, node_id: NodeId) {
+        let state = &mut *self.state;
+        self.docm
+            .remove_and_drop_node_with(node_id, &mut |dropped_node_id| {
+                if let Some(element_id) = state.element_id_mapping.remove(&dropped_node_id)
+                    && state.node_id_mapping.get(element_id.0).copied().flatten()
+                        == Some(dropped_node_id)
+                {
+                    state.node_id_mapping[element_id.0] = None;
+                }
+            });
+    }
+
+    /// Insert `new_node_ids` in place of `node_id`, which is dropped.
+    fn replace_and_drop_node(&mut self, node_id: NodeId, new_node_ids: &[NodeId]) {
+        self.docm.insert_nodes_before(node_id, new_node_ids);
+        self.remove_and_drop_node(node_id);
+    }
+
     /// Find a child in the document by child index path
     fn load_child(&self, path: &[u8]) -> NodeId {
         let top_of_stack_node_id = *self.state.stack.last().unwrap();
@@ -173,7 +195,7 @@ impl WriteMutations for MutationWriter<'_> {
     fn replace_node_with(&mut self, id: ElementId, m: usize) {
         trace!("replace_node_with id:{} m:{}", id.0, m);
         let (anchor_node_id, new_node_ids) = self.state.anchor_and_nodes(id, m);
-        self.docm.replace_node_with(anchor_node_id, &new_node_ids);
+        self.replace_and_drop_node(anchor_node_id, &new_node_ids);
     }
 
     fn replace_placeholder_with_nodes(&mut self, path: &'static [u8], m: usize) {
@@ -183,13 +205,13 @@ impl WriteMutations for MutationWriter<'_> {
         // the stack and then "load_child" reads from the top of the stack.
         let new_node_ids = self.state.m_stack_nodes(m);
         let anchor_node_id = self.load_child(path);
-        self.docm.replace_node_with(anchor_node_id, &new_node_ids);
+        self.replace_and_drop_node(anchor_node_id, &new_node_ids);
     }
 
     fn remove_node(&mut self, id: ElementId) {
         trace!("remove_node id:{}", id.0);
         let node_id = self.state.element_to_node_id(id);
-        self.docm.remove_node(node_id);
+        self.remove_and_drop_node(node_id);
     }
 
     fn push_root(&mut self, id: ElementId) {
@@ -245,7 +267,7 @@ impl WriteMutations for MutationWriter<'_> {
         // Set/unset custom widget for <object data>
         if local_name == "data" {
             let element_name = self.docm.element_name(node_id).unwrap();
-            if element_name.local.as_ref() == "object" {
+            if element_name.local.as_str() == "object" {
                 match value {
                     AttributeValue::Any(value) => {
                         if let Some(value) = value
@@ -397,19 +419,160 @@ fn set_attribute_inner(
         return;
     }
 
-    let name = qual_name(local_name, ns);
+    let name = qual_name(local_name, Some(ns.unwrap_or("")));
 
     // FIXME: more principled handling of special case attributes
     match value {
         None => docm.clear_attribute(node_id, name),
         Some(value) => {
-            if local_name == "checked" && is_falsy {
+            if is_falsy && is_bool_attr(local_name) {
                 docm.clear_attribute(node_id, name);
             } else if local_name == "dangerous_inner_html" {
                 docm.set_inner_html(node_id, value);
             } else {
                 docm.set_attribute(node_id, name, value);
             }
+        }
+    }
+}
+
+/// HTML boolean attributes are "on" whenever they are present, regardless of their value, so a
+/// falsy value (e.g. `disabled: false`) must remove the attribute rather than write `"false"`.
+///
+/// Mirrors `BOOL_ATTRS` in `dioxus-ssr` and `isBoolAttr` in the web interpreter.
+fn is_bool_attr(name: &str) -> bool {
+    matches!(
+        name,
+        "allowfullscreen"
+            | "allowpaymentrequest"
+            | "async"
+            | "autofocus"
+            | "autoplay"
+            | "checked"
+            | "controls"
+            | "default"
+            | "defer"
+            | "disabled"
+            | "formnovalidate"
+            | "hidden"
+            | "inert"
+            | "ismap"
+            | "itemscope"
+            | "loop"
+            | "multiple"
+            | "muted"
+            | "nomodule"
+            | "novalidate"
+            | "open"
+            | "playsinline"
+            | "readonly"
+            | "required"
+            | "reversed"
+            | "selected"
+            | "truespeed"
+            | "webkitdirectory"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{DioxusDocument, DocumentConfig};
+    use blitz_dom::Document as _;
+    use blitz_dom::LocalName;
+    use dioxus::prelude::*;
+    use dioxus_core::ScopeId;
+    use std::{cell::Cell, rc::Rc};
+
+    fn build(app: fn() -> Element) -> DioxusDocument {
+        let mut doc = DioxusDocument::new(VirtualDom::new(app), DocumentConfig::default());
+        doc.initial_build();
+        doc
+    }
+
+    fn attr(doc: &DioxusDocument, selector: &str, name: &str) -> Option<String> {
+        let inner = doc.inner.borrow();
+        let node_id = inner
+            .query_selector(selector)
+            .unwrap()
+            .unwrap_or_else(|| panic!("no node matches {selector}"));
+        inner
+            .get_node(node_id)
+            .unwrap()
+            .attr(LocalName::from(name))
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn falsy_boolean_attributes_are_removed() {
+        fn app() -> Element {
+            let off = false;
+            let on = true;
+            rsx! {
+                input {
+                    id: "off",
+                    r#type: "checkbox",
+                    disabled: off,
+                    readonly: off,
+                    required: off,
+                    checked: off,
+                    title: "false",
+                }
+                input { id: "literal", r#type: "checkbox", disabled: false }
+                input { id: "on", r#type: "checkbox", disabled: on, required: on }
+                details { id: "details", open: off }
+                select {
+                    id: "select",
+                    multiple: off,
+                    option { id: "option", selected: off }
+                }
+            }
+        }
+
+        let doc = build(app);
+
+        for name in ["disabled", "readonly", "required", "checked"] {
+            assert_eq!(
+                attr(&doc, "#off", name),
+                None,
+                "`{name}: false` should be absent"
+            );
+        }
+        assert_eq!(attr(&doc, "#literal", "disabled"), None);
+        assert_eq!(attr(&doc, "#details", "open"), None);
+        assert_eq!(attr(&doc, "#select", "multiple"), None);
+        assert_eq!(attr(&doc, "#option", "selected"), None);
+
+        // Truthy boolean attributes are still present.
+        assert_eq!(attr(&doc, "#on", "disabled").as_deref(), Some("true"));
+        assert_eq!(attr(&doc, "#on", "required").as_deref(), Some("true"));
+
+        // Non-boolean attributes keep their falsy-looking value.
+        assert_eq!(attr(&doc, "#off", "title").as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn boolean_attributes_follow_their_value_after_mount() {
+        fn app() -> Element {
+            let on = consume_context::<Rc<Cell<bool>>>().get();
+            rsx! {
+                input { id: "input", r#type: "checkbox", disabled: on, checked: on }
+            }
+        }
+
+        let on: Rc<Cell<bool>> = Rc::new(Cell::new(true));
+        let vdom = VirtualDom::new(app).with_root_context(Rc::clone(&on));
+        let mut doc = DioxusDocument::new(vdom, DocumentConfig::default());
+        doc.initial_build();
+        doc.inner.borrow_mut().resolve(0.0);
+
+        for value in [true, false, true, false] {
+            on.set(value);
+            doc.vdom.mark_dirty(ScopeId::APP);
+            doc.poll(None);
+
+            let expected = value.then_some("true");
+            assert_eq!(attr(&doc, "#input", "disabled").as_deref(), expected);
+            assert_eq!(attr(&doc, "#input", "checked").as_deref(), expected);
         }
     }
 }

@@ -40,6 +40,8 @@ mod document;
 pub mod node;
 
 mod config;
+/// CSSOM stylesheet access (`document.styleSheets`, `CSSStyleSheet`, `CSSRule`)
+mod cssom;
 mod debug;
 mod events;
 mod font_metrics;
@@ -69,7 +71,10 @@ mod tree;
 
 mod url;
 
-pub use resolved_style::css_property_is_supported;
+pub use cssom::{CssRuleInfo, CssomError};
+pub use resolved_style::{
+    css_property_is_supported, parse_transform_matrix, resolved_style_property_names,
+};
 pub use stylo_to_kurbo::resolve_2d_transform;
 
 pub mod net;
@@ -78,8 +83,10 @@ pub mod util;
 #[cfg(feature = "accessibility")]
 mod accessibility;
 
+pub use crate::layout::paint_tree::{HoistedPaintChild, StackingContext, hoisted_child_position};
 pub use crate::layout::replaced::IntrinsicSizes;
 pub use crate::layout::table::{CollapsedBorders, CollapsedEdge};
+pub use crate::layout::text_transform::{full_size_kana, full_width};
 #[cfg(feature = "custom-widget")]
 pub use crate::node::Widget;
 
@@ -87,7 +94,9 @@ pub use blitz_traits::node_id::NodeId;
 // Re-export taffy: it is part of blitz-dom's public API (e.g. `Node::style`,
 // `Node::final_layout`)
 pub use config::{DocumentConfig, StyleThreading};
-pub use document::{BaseDocument, DocGuard, DocGuardMut, Document, PlainDocument};
+pub use document::{
+    BaseDocument, BoundingRect, DocGuard, DocGuardMut, Document, PlainDocument, UserAgentStylesheet,
+};
 pub use markup5ever::{
     LocalName, Namespace, NamespaceStaticSet, Prefix, PrefixStaticSet, QualName, local_name,
     namespace_prefix, namespace_url, ns,
@@ -112,6 +121,7 @@ pub fn dom_node_id(id: taffy::NodeId) -> NodeId {
 pub use style::Atom;
 pub use style::invalidation::element::restyle_hints::RestyleHint;
 pub use style::media_queries::MediaType;
+pub use style::stylist::RegisterCustomPropertyResult;
 pub type SelectorList = selectors::SelectorList<style::selector_parser::SelectorImpl>;
 pub use events::{EventDriver, EventHandler, NoopEventHandler};
 pub use html::{DummyHtmlParserProvider, HtmlParserProvider};

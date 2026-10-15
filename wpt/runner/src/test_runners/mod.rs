@@ -12,6 +12,7 @@ use regex::Regex;
 
 use harness_test::WptScriptFetcher;
 
+use crate::test_variants::is_xml;
 use crate::{SubtestCounts, TestFlags, TestKind, TestStatus, ThreadCtx};
 
 mod attr_test;
@@ -24,7 +25,7 @@ mod ref_test;
 pub use attr_test::process_attr_test;
 pub use crash_test::process_crash_test;
 pub use harness_test::process_harness_test;
-pub use js_wrapper::{js_test_has_window_variant, wrapper_html_for_js_test};
+pub use js_wrapper::{js_test_has_window_variant, js_test_variants, wrapper_html_for_js_test};
 pub use ref_test::process_ref_test;
 
 static TIMEOUT_QUARANTINE: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
@@ -172,6 +173,7 @@ pub struct SubtestResult {
 pub fn process_test_file(
     ctx: &mut ThreadCtx,
     relative_path: &str,
+    test_url: &str,
 ) -> (
     TestKind,
     TestFlags,
@@ -254,13 +256,13 @@ pub fn process_test_file(
         }
 
         let html = wrapper_html_for_js_test(relative_path, &file_contents);
-        let (status, counts, results) = process_harness_test(ctx, &html, relative_path);
+        let (status, counts, results) = process_harness_test(ctx, &html, test_url);
         return (TestKind::TestHarness, flags, status, counts, results);
     }
 
     // Crash Test
     if is_crash_test(relative_path) {
-        let counts = process_crash_test(ctx, relative_path, &file_contents, flags);
+        let counts = process_crash_test(ctx, test_url, &file_contents, flags);
         let status = counts.as_status();
         return (TestKind::Crash, flags, status, counts, Vec::new());
     }
@@ -289,7 +291,7 @@ pub fn process_test_file(
     if !match_references.is_empty() || !mismatch_references.is_empty() {
         let counts = process_ref_test(
             ctx,
-            relative_path,
+            test_url,
             file_contents.as_str(),
             &match_references,
             &mismatch_references,
@@ -313,8 +315,7 @@ pub fn process_test_file(
 
         debug!("{selector}");
 
-        let (status, counts, results) =
-            process_attr_test(ctx, &selector, &file_contents, relative_path);
+        let (status, counts, results) = process_attr_test(ctx, &selector, &file_contents, test_url);
 
         return (TestKind::Attr, flags, status, counts, results);
     }
@@ -322,7 +323,7 @@ pub fn process_test_file(
 
     // Testharness (testharness.js) test
     if ctx.testharness_re.is_match(&file_contents) {
-        let (status, counts, results) = process_harness_test(ctx, &file_contents, relative_path);
+        let (status, counts, results) = process_harness_test(ctx, &file_contents, test_url);
         return (TestKind::TestHarness, flags, status, counts, results);
     }
 
@@ -365,10 +366,7 @@ fn parse_and_resolve_document(
     // Extensions which wptserve serves with an XML content type must be parsed
     // as XML: content sniffing cannot detect all XHTML documents (e.g. ones
     // with a plain `<!DOCTYPE html>`)
-    let is_xml = [".xht", ".xhtm", ".xhtml", ".xml", ".svg"]
-        .iter()
-        .any(|ext| relative_path.ends_with(ext));
-    let mut document = if is_xml {
+    let mut document = if is_xml(relative_path) {
         HtmlDocument::from_xml(html, config)
     } else {
         HtmlDocument::from_html(html, config)
@@ -407,7 +405,35 @@ mod tests {
 
     #[test]
     fn timeout_quarantine_is_valid() {
-        assert_eq!(TIMEOUT_QUARANTINE.len(), 247);
+        const KNOWN_REASONS: &[&str] = &[
+            "animation-events",
+            "content-visibility-events",
+            "dynamic-load-events",
+            "focus-events",
+            "font-loading-events",
+            "manual-interaction",
+            "media-query-events",
+            "no-tests-registered",
+            "rendering-frame",
+            "scroll-events",
+            "testdriver",
+            "transition-events",
+            "unbounded-job-execution",
+            "unsupported-async-browser-behavior",
+        ];
+
+        // Loading the map already rejects lines without a reason and duplicate paths
+        assert!(!TIMEOUT_QUARANTINE.is_empty());
+        for (path, reason) in TIMEOUT_QUARANTINE.iter() {
+            assert!(
+                !path.is_empty() && !path.contains(char::is_whitespace),
+                "invalid quarantined test path: {path:?}"
+            );
+            assert!(
+                KNOWN_REASONS.contains(reason),
+                "unknown quarantine reason {reason:?} for {path} (add it to KNOWN_REASONS if intentional)"
+            );
+        }
         assert_eq!(
             TIMEOUT_QUARANTINE.get("css/selectors/focus-visible-001.html"),
             Some(&"testdriver")

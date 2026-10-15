@@ -11,6 +11,13 @@ use super::{
     this_node_id, to_rust_string,
 };
 
+/// `document.styleSheets`: the `StyleSheetList` (built by the JS bootstrap)
+/// of the document's author stylesheets
+fn style_sheets(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    this_node_id(this)?;
+    super::call_js_helper("__blitz_style_sheets", &[], context)
+}
+
 pub(crate) fn init_document_proto(proto: &JsObject, context: &mut Context) {
     define_accessor(
         proto,
@@ -32,6 +39,14 @@ pub(crate) fn init_document_proto(proto: &JsObject, context: &mut Context) {
     define_accessor(proto, "defaultView", Some(default_view), None, context);
     define_accessor(proto, "title", Some(title), None, context);
     define_accessor(proto, "readyState", Some(ready_state), None, context);
+    define_accessor(proto, "styleSheets", Some(style_sheets), None, context);
+    define_accessor(
+        proto,
+        "children",
+        Some(super::element::children),
+        None,
+        context,
+    );
     define_accessor(
         proto,
         "childElementCount",
@@ -57,6 +72,13 @@ pub(crate) fn init_document_proto(proto: &JsObject, context: &mut Context) {
     define_method(proto, "createElement", 1, create_element, context);
     define_method(proto, "createElementNS", 2, create_element_ns, context);
     define_method(proto, "createTextNode", 1, create_text_node, context);
+    define_method(
+        proto,
+        "getSelection",
+        0,
+        super::selection::get_selection,
+        context,
+    );
     define_method(proto, "createComment", 1, create_comment, context);
     define_method(
         proto,

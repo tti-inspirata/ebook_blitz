@@ -31,7 +31,7 @@ exclude = ["sites"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/dioxuslabs/blitz"
 repository = "https://github.com/dioxuslabs/blitz"
@@ -41,35 +41,35 @@ rust-version = "1.91.0"
 
 [workspace.dependencies]
 # Blitz dependencies(in-repo)
-blitz = { version = "=0.3.0-beta.2", path = "./packages/blitz" }
-blitz-dom = { version = "=0.3.0-beta.2", path = "./packages/blitz-dom", default-features = false }
-blitz-html = { version = "=0.3.0-beta.2", path = "./packages/blitz-html", default-features = false }
-blitz-net = { version = "=0.3.0-beta.2", path = "./packages/blitz-net", default-features = false }
-blitz-paint = { version = "=0.3.0-beta.2", path = "./packages/blitz-paint", default-features = false }
-blitz-vibey-script = { version = "=0.3.0-beta.2", path = "./packages/blitz-vibey-script", default-features = false }
-blitz-shell = { version = "=0.3.0-beta.2", path = "./packages/blitz-shell", default-features = false }
-blitz-traits = { version = "=0.3.0-beta.2", path = "./packages/blitz-traits", default-features = false }
-stylo_taffy = { version = "=0.3.0-beta.2", path = "./packages/stylo_taffy", default-features = false }
+blitz = { version = "=0.3.0-beta.3", path = "./packages/blitz" }
+blitz-dom = { version = "=0.3.0-beta.3", path = "./packages/blitz-dom", default-features = false }
+blitz-html = { version = "=0.3.0-beta.3", path = "./packages/blitz-html", default-features = false }
+blitz-net = { version = "=0.3.0-beta.3", path = "./packages/blitz-net", default-features = false }
+blitz-paint = { version = "=0.3.0-beta.3", path = "./packages/blitz-paint", default-features = false }
+blitz-vibey-script = { version = "=0.3.0-beta.3", path = "./packages/blitz-vibey-script", default-features = false }
+blitz-shell = { version = "=0.3.0-beta.3", path = "./packages/blitz-shell", default-features = false }
+blitz-traits = { version = "=0.3.0-beta.3", path = "./packages/blitz-traits", default-features = false }
+stylo_taffy = { version = "=0.3.0-beta.3", path = "./packages/stylo_taffy", default-features = false }
 dioxus-native = { version = "0.7.0", path = "./packages/dioxus-native", default-features = false }
 dioxus-native-dom = { version = "0.7.0", path = "./packages/dioxus-native-dom", default-features = false }
 debug_timer = { version = "0.1.2", path = "./packages/debug_timer" }
-accesskit_xplat = { version = "0.1", path = "./packages/accesskit_xplat", default-features = false }
+accesskit_xplat = { version = "0.2", path = "./packages/accesskit_xplat", default-features = false }
 browser-persistence = { path = "./apps/browser/persistence" }
 blitz-test-harness = { path = "./packages/blitz-test-harness" }
 
 # Servo dependencies
-style = { version = "0.20.0", package = "stylo" }
-style_traits = { version = "0.20.0", package = "stylo_traits" }
-style_atoms = { version = "0.20.0", package = "stylo_atoms" }
-style_config = { version = "0.20.0", package = "stylo_static_prefs" }
-style_dom = { version = "0.20.0", package = "stylo_dom" }
-selectors = { version = "0.40.0", package = "selectors" }
-cssparser = { version = "0.37.0" }
+style = { version = "0.22.0", package = "stylo" }
+style_traits = { version = "0.22.0", package = "stylo_traits" }
+style_atoms = { version = "0.22.0", package = "stylo_atoms" }
+style_config = { version = "0.22.0", package = "stylo_static_prefs" }
+style_dom = { version = "0.22.0", package = "stylo_dom" }
+selectors = { version = "0.41.0", package = "selectors" }
+cssparser = { version = "0.38.0" }
 
 # HTML5ever dependencies
-markup5ever = "0.39.0" # needs to match stylo web_atoms version
-html5ever = "0.39.0"   # needs to match stylo web_atoms version
-xml5ever = "0.39.0"    # needs to match stylo web_atoms version
+markup5ever = "0.40.0" # needs to match stylo web_atoms version
+html5ever = "0.40.1"   # needs to match stylo web_atoms version
+xml5ever = "0.40.0"    # needs to match stylo web_atoms version
 
 # Other Servo dependencies
 euclid = "0.22"
@@ -98,43 +98,44 @@ dioxus-cli-config = { version = "0.7.3" }
 dioxus-core-macro = { version = "0.7.3" }
 
 # Taffy + Parley + Fontations
-taffy = { version = "0.14.0", default-features = false, features = [
+taffy = { version = "0.15", default-features = false, features = [
     "std",
     "flexbox",
+    "flexbox_balance",
     "grid",
     "block_layout",
     "content_size",
     "calc",
     "detailed_layout_info",
 ] }
-parley = { version = "0.11.1", default-features = false, features = ["std"] }
+parley = { version = "0.12", default-features = false, features = ["std"] }
 skrifa = { version = "0.44", default-features = false, features = [
     "std",
 ] } # Should match parley and vello versions
 
 # AnyRender
-anyrender = { version = "0.13.0" }
-anyrender_serialize = { version = "0.7.0" }
-anyrender_skia = { version = "0.11.0" }
-anyrender_vello = { version = "0.14.0" }
-anyrender_vello_cpu = { version = "0.17.0" }
-anyrender_vello_hybrid = { version = "0.10.0" }
-anyrender_svg = { version = "0.14.0" }
-wgpu_context = { version = "0.9.0" }
+anyrender = { version = "0.14.0" }
+anyrender_serialize = { version = "0.8.0" }
+anyrender_skia = { version = "0.12.0" }
+anyrender_vello = { version = "0.15.0" }
+anyrender_vello_cpu = { version = "0.18.0" }
+anyrender_vello_hybrid = { version = "0.11.0" }
+anyrender_svg = { version = "0.15.0" }
+wgpu_context = { version = "0.10.0" }
 
 # Linebender + Fontations + WGPU + SVG
 color = "0.3"
 linebender_resource_handle = "0.1"
 peniko = "0.6.0"
 kurbo = "0.13.1"
-wgpu = "29"
+wgpu = "30"
 usvg = "0.48.1"
 svgtypes = "0.16.1" # Should match usvg's version
 
 # Windowing & Input
 raw-window-handle = "0.6.0"
-winit = { version = "=0.31.0-beta.2" }
-accesskit = "0.24"
+winit = { version = "=0.31.0-beta.3" }
+accesskit = "0.25"
 arboard = { version = "3.4.1", default-features = false }
 rfd = { version = "0.17.1", default-features = false }
 keyboard-types = "0.7"
@@ -188,7 +189,15 @@ smol_str = "0.3"
 bitflags = "2.8.0"
 bytemuck = "1"
 rayon = "1"
+test-that = "0.5.2"
 thread_local = "1"
+
+# Unicode (ICU4X)
+icu_casemap = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_locale_core = { version = "2.3", default-features = false }
+icu_properties = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_segmenter = { version = "2.3", default-features = false, features = ["compiled_data"] }
+writeable = { version = "0.6", default-features = false }
 
 [profile.profile]
 inherits = "release"
@@ -279,10 +288,10 @@ peniko = { workspace = true }
 color = { workspace = true }
 env_logger = "0.11"
 tracing-subscriber = "0.3"
-vello = "0.10"
-vello_cpu = "0.1"
-vello_hybrid = "0.1"
-vello_common = "0.1"
+vello = "0.11"
+vello_cpu = "0.3"
+vello_gpu = "0.3"
+vello_common = "0.3"
 wgpu = { workspace = true }
 wgpu_context = { workspace = true }
 rustc-hash = { workspace = true }
@@ -298,7 +307,7 @@ rustc-hash = { workspace = true }
 
 # vello = { path = "../vello/vello" }
 # vello_cpu = { path = "../vello/sparse_strips/vello_cpu" }
-# vello_hybrid = { path = "../vello/sparse_strips/vello_hybrid" }
+# vello_gpu = { path = "../vello/sparse_strips/vello_gpu" }
 # vello_common = { path = "../vello/sparse_strips/vello_common" }
 # glifo = { path = "../vello/glifo" }
 
@@ -319,8 +328,8 @@ rustc-hash = { workspace = true }
 # fontique = { path = "../parley/fontique" }
 
 
-# blitz-dom 用了 parley fork 才有的 `TreeBuilder::set_base_direction`(CSS `direction` →
-# 段落基准方向),crates.io 的 parley 0.11.1 没有这个 API。ReaderEngine 以 root 身份构建时
+# 让 blitz 单独构建时也用 parley fork(CJK justify / 标点挤压等,见 flutter_reader
+# `文档/上游同步.md`),与 ReaderEngine 实际链接的版本一致。ReaderEngine 以 root 身份构建时
 # 走它自己的 `[patch.crates-io]`,cargo 忽略非 root 包的 patch,所以那条路径不受影响;这条
 # 只为让本仓库在 flutter_reader 的 third_party/ 布局下能单独 `cargo check`。
 # 路径按同级子模块解析:third_party/ebook_blitz → third_party/ebook_parley。

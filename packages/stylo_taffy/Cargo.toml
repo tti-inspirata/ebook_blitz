@@ -21,6 +21,9 @@ style_atoms = { workspace = true }
 default = ["std", "block", "flexbox", "grid"]
 std = ["taffy/std"]
 block = ["taffy/block_layout"]
-flexbox = ["taffy/flexbox"]
+flexbox = ["taffy/flexbox", "taffy/flexbox_balance"]
 grid = ["taffy/grid"]
 floats = ["taffy/float_layout"]
+# Frame-aware style getters for CSS vertical writing modes (transposes physical styles into Taffy's
+# inline/block axes). Off by default: every getter is the plain physical mapping.
+writing-mode = []

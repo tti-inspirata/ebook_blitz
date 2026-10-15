@@ -10,7 +10,6 @@ use style::values::computed::{
     BorderCornerRadius, BorderStyle, CSSPixelLength, Length, LengthPercentage,
     TextDecorationLength, TextDecorationLine, TextUnderlinePosition,
 };
-use style::values::generics::box_::{BaselineShift, BaselineShiftKeyword};
 use style::values::generics::text::{GenericTextDecorationInset, GenericTextDecorationLength};
 
 use crate::color::{Color, ToColorColor as _};
@@ -104,7 +103,7 @@ pub(crate) fn draw_inline_decorations(
             // fragments, hence starting the walk at its parent.
             let (leaf, x0, x1, y0, y1) = match item {
                 PositionedLayoutItem::GlyphRun(glyph_run) => {
-                    let metrics = glyph_run.run().metrics();
+                    let metrics = glyph_run.run().font_metrics();
                     let x0 = glyph_run.offset() as f64;
                     let baseline = glyph_run.baseline() as f64;
                     (
@@ -359,6 +358,8 @@ struct ResolvedDecoration {
     underline_offset: Option<LengthPercentage>,
     /// Whether `text-underline-position: under` is in effect.
     underline_under: bool,
+    /// Whether `text-underline-position: from-font` is in effect.
+    underline_from_font: bool,
     /// `text-decoration-inset`. Resolved per run.
     inset: GenericTextDecorationInset<LengthPercentage>,
 }
@@ -414,6 +415,9 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
             underline_under: itext
                 .text_underline_position
                 .contains(TextUnderlinePosition::UNDER),
+            underline_from_font: itext
+                .text_underline_position
+                .contains(TextUnderlinePosition::FROM_FONT),
             inset: text.text_decoration_inset.clone(),
         }
     });
@@ -431,7 +435,8 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
 /// decorating box (its own text), falling back to the first run it covers.
 #[derive(Clone)]
 struct DecorationRunGeometry {
-    /// The line's baseline (shared by every run on the line).
+    /// The baseline the decoration is positioned from (the run's own, `vertical-align`
+    /// shifted, baseline).
     baseline: f32,
     ascent: f32,
     descent: f32,
@@ -616,15 +621,29 @@ fn flush_line_decorations(
     scale: f64,
     deco_boxes: &[LineDecoration],
     win_ascent_ratios: &mut WinAscentCache,
+    inline_root_id: NodeId,
+    line_baseline: f32,
 ) {
     // Draw innermost boxes first so ancestors' decorations paint on top, matching the
     // per-run drawing order this replaced (`stack.iter().rev()`).
     for acc in deco_boxes.iter().rev() {
         let deco = &acc.deco;
         // Prefer the decorating box's own font; fall back to the first run it covers.
-        let Some(geom) = acc.own.as_ref().or(acc.first.as_ref()) else {
-            continue;
+        let geom = match (&acc.own, &acc.first) {
+            (Some(own), _) => own.clone(),
+            (None, Some(first)) => {
+                let mut geom = first.clone();
+                // A descendant run's baseline may be shifted by `vertical-align`, but the
+                // decoration is positioned from the decorating box's own baseline. For the
+                // inline root that is the line's baseline.
+                if acc.node_id == inline_root_id {
+                    geom.baseline = line_baseline;
+                }
+                geom
+            }
+            (None, None) => continue,
         };
+        let geom = &geom;
         let width = acc.max_x - acc.min_x;
         if width <= 0.0 {
             continue;
@@ -668,8 +687,12 @@ fn flush_line_decorations(
             // (below descenders) rather than at the font's suggested position near the
             // alphabetic baseline. We anchor the top of the line at the descent so it clears
             // descending glyphs like "gqy".
+            // An explicit offset under `auto` is taken from the alphabetic
+            // baseline, as CSS and Chrome have it, not from the auto gap.
             let base_offset = if deco.underline_under {
                 -geom.descent
+            } else if deco.underline_offset.is_some() && !deco.underline_from_font {
+                0.0
             } else {
                 geom.underline_offset
             };
@@ -801,7 +824,7 @@ pub(crate) fn stroke_text<'a>(
                 let run = glyph_run.run();
                 let font = run.font();
                 let font_size = run.font_size();
-                let metrics = run.metrics();
+                let metrics = run.font_metrics();
                 let style = glyph_run.style();
                 let synthesis = run.synthesis();
                 let glyph_xform = synthesis
@@ -812,38 +835,6 @@ pub(crate) fn stroke_text<'a>(
                     // visually Y-down, so invert the sign to preserve CSS italic
                     // direction for synthetic skew.
                     .map(|angle| Affine::skew(-(angle.to_radians().tan() as f64), 0.0));
-
-                // `vertical-align: super/sub` 被 Stylo 解析成 `baseline-shift`
-                // (css-inline-3)。parley 布局不会移动字形,不在绘制时补这一步的话
-                // 上标/下标会贴着基线。符号是屏幕空间(Y 向下):抬升为负。
-                let span_node = doc.get_node(style.brush.id).unwrap();
-                let baseline_shift_dy: f32 = {
-                    // 按规范,偏移量相对**父元素**的 used font-size。
-                    let parent_font_size = span_node
-                        .parent
-                        .and_then(|pid| doc.get_node(pid))
-                        .and_then(|p| p.primary_styles())
-                        .map(|ps| ps.clone_font_size().used_size().px())
-                        .unwrap_or(font_size);
-                    match span_node
-                        .primary_styles()
-                        .map(|st| st.get_box().baseline_shift.clone())
-                    {
-                        // 字体度量不可用时的 UA 默认偏移:super 抬 1/3、sub 降 1/5 字号。
-                        Some(BaselineShift::Keyword(BaselineShiftKeyword::Super)) => {
-                            -parent_font_size / 3.0
-                        }
-                        Some(BaselineShift::Keyword(BaselineShiftKeyword::Sub)) => {
-                            parent_font_size / 5.0
-                        }
-                        // 正的 baseline-shift 长度表示抬升。
-                        Some(BaselineShift::Length(lp)) => {
-                            -lp.resolve(Length::new(parent_font_size)).px()
-                        }
-                        // top/center/bottom 关键字是行盒相对的,不支持。
-                        _ => 0.0,
-                    }
-                };
 
                 let css_font_size = font_size as f64 / scale;
 
@@ -890,11 +881,12 @@ pub(crate) fn stroke_text<'a>(
                     embolden += kurbo::Vec2::new(FAUX_BOLD_RATIO * fs, FAUX_BOLD_RATIO * fs);
                 }
 
+                let normalized_coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
                 scene.draw_glyphs(
                     font,
                     font_size,
                     !FONT_EMBOLDEN_ENABLED, // hint
-                    run.normalized_coords(),
+                    normalized_coords,
                     embolden,
                     Fill::NonZero,
                     &anyrender::Paint::from(text_color),
@@ -904,7 +896,7 @@ pub(crate) fn stroke_text<'a>(
                     glyph_run.positioned_glyphs().map(|glyph| anyrender::Glyph {
                         id: glyph.id as _,
                         x: glyph.x,
-                        y: glyph.y + baseline_shift_dy,
+                        y: glyph.y,
                     }),
                 );
 
@@ -914,7 +906,7 @@ pub(crate) fn stroke_text<'a>(
                 // produce a single straight line rather than one stepped segment per run.
                 let geometry = DecorationRunGeometry {
                     // 装饰线跟随上下标一起位移,否则上标的下划线会留在原基线上。
-                    baseline: glyph_run.baseline() + baseline_shift_dy,
+                    baseline: glyph_run.baseline(),
                     ascent: metrics.ascent,
                     descent: metrics.descent,
                     underline_offset: metrics.underline_offset,
@@ -961,7 +953,15 @@ pub(crate) fn stroke_text<'a>(
             }
         }
 
-        flush_line_decorations(scene, transform, scale, deco_boxes, win_ascent_ratios);
+        flush_line_decorations(
+            scene,
+            transform,
+            scale,
+            deco_boxes,
+            win_ascent_ratios,
+            inline_root_id,
+            line.metrics().baseline,
+        );
     }
 }
 
