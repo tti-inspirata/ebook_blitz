@@ -760,6 +760,20 @@ pub(crate) fn build_table_context(
                 *column = percent_track(percent, extra);
             }
         }
+
+        // 表格比各列宽时多出的宽度要分给各列(CSS 2.1 §17.5.2.1)。有未指定宽度的列时
+        // 由它们的 `1fr` 吃掉;全是指定宽度的列时，定长列按原宽比例伸展(同 Chrome)。
+        if !column_sizes.iter().any(|column| column.max.is_fr()) {
+            for column in column_sizes.iter_mut() {
+                if column.max.into_raw().tag() == taffy::CompactLength::LENGTH_TAG {
+                    let len = column.max.into_raw().value();
+                    *column = style_helpers::minmax(
+                        style_helpers::length(len),
+                        style_helpers::fr(len),
+                    );
+                }
+            }
+        }
     }
 
     // A row's `height` is a minimum: the row grows to fit the content of its cells.
@@ -1171,6 +1185,15 @@ fn collect_table_cells(
                 if let Some(row) = rows.last_mut() {
                     row.is_constrained = true;
                 }
+            }
+
+            // 单元格的 `height` 只是最小高度：原样留给 taffy 会变成定高格子，内容溢出叠进
+            // 下一行。单元格自身的 block 布局在 stylo_taffy 的 wrapper 里同样折算。
+            if let Some(min_height) =
+                stylo_taffy::convert::table_cell_min_height(style.size.height, style.min_size.height)
+            {
+                style.min_size.height = min_height;
+                style.size.height = style_helpers::auto();
             }
 
             style.size.width = style_helpers::auto();

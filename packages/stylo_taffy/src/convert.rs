@@ -523,6 +523,26 @@ pub fn table_cell_vertical_align(style: &stylo::ComputedValues) -> Option<taffy:
     Some(align)
 }
 
+/// 表格单元格的 `height` 只是最小高度(CSS 2.1 §17.5.3),行要能随内容撑开。
+/// 返回把 `height`(长度/百分比)折进 `min-height` 后的最小高度;返回 `Some` 时调用方
+/// 应把 `height` 视作 `auto`。已有更大的长度 `min-height` 时保留它。
+#[inline]
+pub fn table_cell_min_height(
+    height: taffy::Dimension,
+    min_height: taffy::LengthPercentageAuto,
+) -> Option<taffy::LengthPercentageAuto> {
+    let folded = match height.tag() {
+        taffy::CompactLength::LENGTH_TAG => taffy::LengthPercentageAuto::length(height.value()),
+        taffy::CompactLength::PERCENT_TAG => taffy::LengthPercentageAuto::percent(height.value()),
+        _ => return None,
+    };
+    let min = min_height.into_raw();
+    let keep_min = min.tag() == taffy::CompactLength::LENGTH_TAG
+        && height.tag() == taffy::CompactLength::LENGTH_TAG
+        && min.value() >= height.value();
+    Some(if keep_min { min_height } else { folded })
+}
+
 /// Convert `justify-content`, resolving the physical `left`/`right` keywords against the
 /// container's flex main axis and text direction. `left`/`right` behave as `start` when the
 /// main axis is not the inline axis (<https://www.w3.org/TR/css-align-3/#positional-values>).

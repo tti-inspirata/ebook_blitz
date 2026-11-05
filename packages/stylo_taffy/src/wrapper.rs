@@ -71,6 +71,11 @@ impl<T: Deref<Target = ComputedValues>> TaffyStyloStyle<T> {
         }
     }
 
+    #[inline]
+    fn is_table_cell(&self) -> bool {
+        self.effective_display().inside() == stylo::DisplayInside::TableCell
+    }
+
     /// Create a new [`TaffyStyloStyle`] from a stylo style and [`StyleFlags`], expressed in the
     /// style's own writing mode
     pub fn new(style: T, flags: StyleFlags) -> Self {
@@ -249,19 +254,38 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
     #[inline]
     fn size(&self) -> taffy::Size<taffy::Dimension> {
         let position_styles = self.style.get_position();
-        self.size(taffy::Size {
+        let mut size = self.size(taffy::Size {
             width: convert::dimension(&position_styles.width),
             height: convert::dimension(&position_styles.height),
-        })
+        });
+        // 单元格的 `height` 折进 min-height(见 `convert::table_cell_min_height`)
+        if self.is_table_cell()
+            && convert::table_cell_min_height(size.height, taffy::LengthPercentageAuto::auto())
+                .is_some()
+        {
+            size.height = taffy::Dimension::auto();
+        }
+        size
     }
 
     #[inline]
     fn min_size(&self) -> taffy::Size<taffy::LengthPercentageAuto> {
         let position_styles = self.style.get_position();
-        self.size(taffy::Size {
+        let mut min_size = self.size(taffy::Size {
             width: convert::min_size(&position_styles.min_width),
             height: convert::min_size(&position_styles.min_height),
-        })
+        });
+        if self.is_table_cell() {
+            let size = self.size(taffy::Size {
+                width: convert::dimension(&position_styles.width),
+                height: convert::dimension(&position_styles.height),
+            });
+            if let Some(min_height) = convert::table_cell_min_height(size.height, min_size.height)
+            {
+                min_size.height = min_height;
+            }
+        }
+        min_size
     }
 
     #[inline]
