@@ -21,6 +21,23 @@ use crate::{FONT_EMBOLDEN_ENABLED, SELECTION_COLOR};
 /// ~0.02 em stem growth browsers use for faux bold.
 const FAUX_BOLD_RATIO: f64 = 0.02;
 
+/// Faux-bold outline expansion for a run drawn with `font_size` (user units) under
+/// `full_transform` (run transform × glyph transform).
+///
+/// For hinted runs whose transform is a positive uniform scale without vertical
+/// skew, glifo absorbs that scale into the font size and expands the outline in the
+/// absorbed (device) space, so the amount must be scaled too. Otherwise a text box
+/// laid out at 20× size and shrunk by `transform: scale(0.05)` (InDesign FXL
+/// exports) gets a 20× too thick stroke and its glyphs smear into blobs.
+fn faux_bold_amount(font_size: f64, full_transform: Affine, hint: bool) -> f64 {
+    // Mirrors glifo's `is_positive_uniform_scale_without_vertical_skew` (same tolerance).
+    const NEARLY_ZERO: f64 = 1.0 / 4096.0;
+    let [a, b, _, d, _, _] = full_transform.as_coeffs();
+    let absorbed =
+        hint && (a - d).abs() <= NEARLY_ZERO && a > 0.0 && d > 0.0 && b.abs() <= NEARLY_ZERO;
+    FAUX_BOLD_RATIO * font_size * if absorbed { d } else { 1.0 }
+}
+
 /// One fragment of a non-atomic inline element: the part of it that falls on a
 /// single line box. A `<span>` wrapping across three lines has three fragments.
 ///
@@ -877,8 +894,13 @@ pub(crate) fn stroke_text<'a>(
                 // families are usually shipped as a single weight, so without this
                 // `<b>`/`font-weight: bold` renders identical to body text.
                 if synthesis.embolden() {
-                    let fs = font_size as f64;
-                    embolden += kurbo::Vec2::new(FAUX_BOLD_RATIO * fs, FAUX_BOLD_RATIO * fs);
+                    let full_transform = transform * glyph_xform.unwrap_or(Affine::IDENTITY);
+                    let amount = faux_bold_amount(
+                        font_size as f64,
+                        full_transform,
+                        !FONT_EMBOLDEN_ENABLED,
+                    );
+                    embolden += kurbo::Vec2::new(amount, amount);
                 }
 
                 let normalized_coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
@@ -982,4 +1004,27 @@ pub(crate) fn draw_text_selection(
         let rect = kurbo::Rect::new(rect.x0, rect.y0, rect.x1, rect.y1);
         scene.fill(Fill::NonZero, transform, SELECTION_COLOR, None, &rect);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn faux_bold_follows_absorbed_uniform_scale_when_hinted() {
+        // #342: 260px bold text inside `transform: scale(0.05)` is drawn ~13px tall;
+        // the expansion must be 0.02 em of that, not of 260px.
+        let amount = faux_bold_amount(260.0, Affine::scale(0.05), true);
+        assert!((amount - 0.26).abs() < 1e-9, "{amount}");
+        assert_eq!(faux_bold_amount(16.0, Affine::translate((5.0, 7.0)), true), 0.32);
+    }
+
+    #[test]
+    fn faux_bold_stays_in_user_units_when_not_absorbed() {
+        // Non-uniform scale / rotation / unhinted runs are drawn via the full
+        // transform, which already scales the expansion.
+        assert_eq!(faux_bold_amount(260.0, Affine::scale_non_uniform(0.05, 0.1), true), 5.2);
+        assert_eq!(faux_bold_amount(260.0, Affine::rotate(0.3).then_scale(0.05), true), 5.2);
+        assert_eq!(faux_bold_amount(260.0, Affine::scale(0.05), false), 5.2);
+    }
 }
